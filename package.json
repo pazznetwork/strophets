@@ -1,11 +1,14 @@
 {
-  "name": "strophe.ts",
+  "name": "@pazznetwork/strophe.ts",
   "description": "Strophe.ts is an XMPP library for TypeScript",
   "version": "0.0.1",
   "homepage": "https://github.com/pazznetwork/strophets",
   "repository": {
     "type": "git",
     "url": "git://github.com/pazznetwork/strophets"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "keywords": [
     "xmpp",
