@@ -37,7 +37,3 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
-
-# Build
-min.js
-min.js.map
