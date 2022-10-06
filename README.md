@@ -1,9 +1,9 @@
-# Strophe.js
+# Strophe.ts
 
 ![Build Status](https://github.com/strophe/strophejs/actions/workflows/karma-tests.yml/badge.svg)
 
 
-Strophe.js is a JavaScript library for speaking XMPP via BOSH
+Strophe.ts is a JavaScript library for speaking XMPP via BOSH
 ([XEP 124](https://xmpp.org/extensions/xep-0124.html)
 and [XEP 206](https://xmpp.org/extensions/xep-0206.html)) and WebSockets
 ([RFC 7395](http://tools.ietf.org/html/rfc7395)).
@@ -36,11 +36,11 @@ Then, simply run `make check` to run the tests.
 ## License
 
 It is licensed under the [MIT license](https://github.com/strophe/strophejs/raw/master/LICENSE.txt),
-except for the files sha1.js, base64.js and md5.js, which are licensed as public domain and BSD (see these files for details).
+except for the files sha1.ts, base64.ts and md5.ts, which are licensed as public domain and BSD (see these files for details).
 
 ## Author & History
 
-Strophe.js was originally created by Jack Moffitt. It was originally developed
+Strophe.ts was originally created by Jack Moffitt. It was originally developed
 for Chesspark, an online chess community based on XMPP technology. It has been
 cared for and improved over the years and is currently maintained by many
 people in the community.
