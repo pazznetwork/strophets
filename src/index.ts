@@ -19,7 +19,7 @@ export * from './sasl-sha384';
 export * from './sasl-sha512';
 export * from './sasl-xoauth2';
 export * from './scram';
-export * from './shared-connection-worker';
+// export * from './shared-connection-worker';
 export * from './status';
 export * from './timed-handler';
 export * from './timeout';

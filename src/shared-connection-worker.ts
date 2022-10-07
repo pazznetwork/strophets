@@ -111,7 +111,7 @@ export class ConnectionManager {
 }
 
 // @ts-ignore
-onconnect = function (e: { ports: MessagePort[] }) {
+SharedWorkerGlobalScope.onconnect = function (e: { ports: MessagePort[] }) {
   // @ts-ignore
   manager = manager || new ConnectionManager();
   manager.addPort(e.ports[0]);
