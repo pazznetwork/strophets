@@ -6,7 +6,6 @@ import { Builder } from './builder';
 import { addCookies } from './utils';
 import { NS } from './namespace';
 import { forEachChild, getBareJidFromJid, getDomainFromJid, getNodeFromJid, getResourceFromJid, getText, serialize } from './xml';
-import { atob, btoa } from 'abab';
 import { ErrorCondition, handleError } from './error';
 import { $build, $iq, $pres } from './builder-helper';
 import { debug, error, info, log, LogLevel, warn } from './log';
@@ -29,7 +28,7 @@ import { SASLSHA512 } from './sasl-sha512';
  *  _Private_ variable Used to store plugin names that need
  *  initialization on Connection construction.
  */
-const _connectionPlugins = new Map<string, new () => { init: (conn: Connection) => void }>();
+const connectionPlugins = new Map<string, new () => { init: (conn: Connection) => void }>();
 
 /** Function: addConnectionPlugin
  *  Extends the Connection object with the given plugin.
@@ -38,8 +37,8 @@ const _connectionPlugins = new Map<string, new () => { init: (conn: Connection) 
  *    (String) name - The name of the extension.
  *    (Object) ptype - The plugin's prototype.
  */
-export function addConnectionPlugin(name: string, ptype: new () => object) {
-  _connectionPlugins[name] = ptype;
+export function addConnectionPlugin(name: string, ptype: new () => object): void {
+  connectionPlugins[name] = ptype;
 }
 
 /**
@@ -219,7 +218,7 @@ export class Connection {
    *  _Private_ variable that keeps track of the request ids for
    *  connections.
    */
-  static _requestId = 0;
+  static requestId = 0;
 
   /**
    * the service url to connect with
@@ -290,25 +289,22 @@ export class Connection {
 
   disconnection_timeout: number;
 
-  servtype: string;
-
-  mock: boolean;
   /**
    * protocol used for connection
    */
-  _proto: StropheWebsocket | Bosh | WorkerWebsocket;
+  protocol: StropheWebsocket | Bosh | WorkerWebsocket;
 
   worker_attach_promise?: PromiseWrapper<unknown>;
-  _sasl_data: Record<string, unknown>;
+  sasl_data: Record<string, unknown>;
   private mechanisms: SASLMechanism[];
-  _idleTimeout: number;
-  private _disconnectTimeout: TimedHandler;
-  _data: Element[];
-  private _uniqueId: number;
-  private _sasl_success_handler: Handler;
-  private _sasl_failure_handler: Handler;
-  private _sasl_challenge_handler: Handler;
-  private _requests: Request[];
+  idleTimeout: number;
+  private disconnectTimeout: TimedHandler;
+  data: Element[];
+  private uniqueId: number;
+  private sasl_success_handler: Handler;
+  private sasl_failure_handler: Handler;
+  private sasl_challenge_handler: Handler;
+  private requests: Request[];
   private scram_keys: unknown;
   private iqFallbackHandler: Handler;
   private _sasl_mechanism: SASLMechanism;
@@ -471,7 +467,7 @@ export class Connection {
     this.features = null;
 
     // SASL
-    this._sasl_data = {};
+    this.sasl_data = {};
     this.do_bind = false;
     this.do_session = false;
     this.mechanisms = [];
@@ -488,8 +484,8 @@ export class Connection {
       websocket: {}
     };
 
-    this._idleTimeout = null;
-    this._disconnectTimeout = null;
+    this.idleTimeout = null;
+    this.disconnectTimeout = null;
 
     this.authenticated = false;
     this.connected = false;
@@ -498,19 +494,19 @@ export class Connection {
     this.paused = false;
     this.restored = false;
 
-    this._data = [];
-    this._uniqueId = 0;
+    this.data = [];
+    this.uniqueId = 0;
 
-    this._sasl_success_handler = null;
-    this._sasl_failure_handler = null;
-    this._sasl_challenge_handler = null;
+    this.sasl_success_handler = null;
+    this.sasl_failure_handler = null;
+    this.sasl_challenge_handler = null;
 
     // Max retries before disconnecting
     this.maxRetries = 5;
 
     // Call onIdle callback every 1/10th of a second
     // @ts-ignore
-    this._idleTimeout = setTimeout(() => this._onIdle(), 100);
+    this.idleTimeout = setTimeout(() => this._onIdle(), 100);
 
     addCookies(this.options.cookies);
     this.registerSASLMechanisms(this.options.mechanisms);
@@ -535,7 +531,7 @@ export class Connection {
     );
 
     // initialize plugins
-    for (const [key, value] of _connectionPlugins.entries()) {
+    for (const [key, value] of connectionPlugins.entries()) {
       const plugin = new value();
       plugin.init(this);
       this[key] = plugin;
@@ -549,7 +545,7 @@ export class Connection {
    *  before that connection is reused.
    */
   reset(): void {
-    this._proto._reset();
+    this.protocol._reset();
 
     // SASL
     this.do_session = false;
@@ -568,9 +564,9 @@ export class Connection {
     this.disconnecting = false;
     this.restored = false;
 
-    this._data = [];
-    this._requests = [];
-    this._uniqueId = 0;
+    this.data = [];
+    this.requests = [];
+    this.uniqueId = 0;
   }
 
   /** Function: pause
@@ -746,7 +742,7 @@ export class Connection {
 
     this._changeConnectStatus(Status.CONNECTING, null);
 
-    this._proto._connect(wait, hold, route);
+    this.protocol._connect(wait, hold, route);
   }
 
   /** Function: attach
@@ -784,9 +780,9 @@ export class Connection {
     wind?: number
   ): void {
     // @ts-ignore
-    if (this._proto._attach) {
+    if (this.protocol._attach) {
       // @ts-ignore
-      return this._proto._attach(jid, sid, rid, callback, wait, hold, wind);
+      return this.protocol._attach(jid, sid, rid, callback, wait, hold, wind);
     } else {
       const stropheError = new Error('The "attach" method is not available for your connection protocol');
       stropheError.name = 'StropheSessionError';
@@ -828,7 +824,7 @@ export class Connection {
   ): void {
     if (this._sessionCachingSupported()) {
       // @ts-ignore
-      this._proto._restore(jid, callback, wait, hold, wind);
+      this.protocol._restore(jid, callback, wait, hold, wind);
     } else {
       const stropheError = new Error('The "restore" method can only be used with a BOSH connection.');
       stropheError.name = 'StropheSessionError';
@@ -841,7 +837,7 @@ export class Connection {
    * using BOSH.
    */
   _sessionCachingSupported() {
-    if (this._proto instanceof Bosh) {
+    if (this.protocol instanceof Bosh) {
       if (!JSON) {
         return false;
       }
@@ -976,7 +972,7 @@ export class Connection {
     } else {
       this._queueData(elem);
     }
-    this._proto._send();
+    this.protocol._send();
   }
 
   /** Function: flush
@@ -990,7 +986,7 @@ export class Connection {
   flush(): void {
     // cancel the pending idle period and run the idle function
     // immediately
-    clearTimeout(this._idleTimeout);
+    clearTimeout(this.idleTimeout);
     this._onIdle();
   }
 
@@ -1363,12 +1359,12 @@ export class Connection {
         });
       }
       // setup timeout handler
-      this._disconnectTimeout = this._addSysTimedHandler(this.disconnection_timeout, this._onDisconnectTimeout.bind(this));
+      this.disconnectTimeout = this._addSysTimedHandler(this.disconnection_timeout, this._onDisconnectTimeout.bind(this));
       // @ts-ignore
-      this._proto._disconnect(pres);
+      this.protocol._disconnect(pres);
     } else {
       warn('Disconnect was called before Strophe connected to the server');
-      this._proto._abortAllRequests();
+      this.protocol._abortAllRequests();
       this._doDisconnect();
     }
   }
@@ -1379,18 +1375,18 @@ export class Connection {
    *  connection and alerts the user's connection callback.
    */
   _doDisconnect(reason?: string) {
-    if (typeof this._idleTimeout === 'number') {
-      clearTimeout(this._idleTimeout);
+    if (typeof this.idleTimeout === 'number') {
+      clearTimeout(this.idleTimeout);
     }
 
     // Cancel Disconnect Timeout
-    if (this._disconnectTimeout !== null) {
-      this.deleteTimedHandler(this._disconnectTimeout);
-      this._disconnectTimeout = null;
+    if (this.disconnectTimeout !== null) {
+      this.deleteTimedHandler(this.disconnectTimeout);
+      this.disconnectTimeout = null;
     }
 
     debug('_doDisconnect was called');
-    this._proto._doDisconnect();
+    this.protocol._doDisconnect();
 
     this.authenticated = false;
     this.disconnecting = false;
@@ -1477,9 +1473,9 @@ export class Connection {
       if (!mechanism.test(this)) {
         continue;
       }
-      this._sasl_success_handler = this._addSysHandler(this._sasl_success_cb.bind(this), null, 'success', null, null);
-      this._sasl_failure_handler = this._addSysHandler(this._sasl_failure_cb.bind(this), null, 'failure', null, null);
-      this._sasl_challenge_handler = this._addSysHandler(this._sasl_challenge_cb.bind(this), null, 'challenge', null, null);
+      this.sasl_success_handler = this._addSysHandler(this._sasl_success_cb.bind(this), null, 'success', null, null);
+      this.sasl_failure_handler = this._addSysHandler(this._sasl_failure_cb.bind(this), null, 'failure', null, null);
+      this.sasl_challenge_handler = this._addSysHandler(this._sasl_challenge_cb.bind(this), null, 'challenge', null, null);
 
       this._sasl_mechanism = mechanism;
       this._sasl_mechanism.onStart(this);
@@ -1589,7 +1585,7 @@ export class Connection {
    *    false to remove the handler.
    */
   _sasl_success_cb(elem: Element) {
-    if (this._sasl_data['server-signature']) {
+    if (this.sasl_data['server-signature']) {
       let serverSignature;
       const success = atob(getText(elem));
       const attribMatch = /([a-z]+)=([^,]+)(,|$)/;
@@ -1597,33 +1593,33 @@ export class Connection {
       if (matches[1] === 'v') {
         serverSignature = matches[2];
       }
-      if (serverSignature !== this._sasl_data['server-signature']) {
+      if (serverSignature !== this.sasl_data['server-signature']) {
         // remove old handlers
-        this.deleteHandler(this._sasl_failure_handler);
-        this._sasl_failure_handler = null;
-        if (this._sasl_challenge_handler) {
-          this.deleteHandler(this._sasl_challenge_handler);
-          this._sasl_challenge_handler = null;
+        this.deleteHandler(this.sasl_failure_handler);
+        this.sasl_failure_handler = null;
+        if (this.sasl_challenge_handler) {
+          this.deleteHandler(this.sasl_challenge_handler);
+          this.sasl_challenge_handler = null;
         }
-        this._sasl_data = {};
+        this.sasl_data = {};
         return this._sasl_failure_cb(null);
       }
     }
     info('SASL authentication succeeded.');
 
-    if (this._sasl_data.keys) {
-      this.scram_keys = this._sasl_data.keys;
+    if (this.sasl_data.keys) {
+      this.scram_keys = this.sasl_data.keys;
     }
 
     if (this._sasl_mechanism) {
       this._sasl_mechanism.onSuccess();
     }
     // remove old handlers
-    this.deleteHandler(this._sasl_failure_handler);
-    this._sasl_failure_handler = null;
-    if (this._sasl_challenge_handler) {
-      this.deleteHandler(this._sasl_challenge_handler);
-      this._sasl_challenge_handler = null;
+    this.deleteHandler(this.sasl_failure_handler);
+    this.sasl_failure_handler = null;
+    if (this.sasl_challenge_handler) {
+      this.deleteHandler(this.sasl_challenge_handler);
+      this.sasl_challenge_handler = null;
     }
     const streamfeature_handlers: Handler[] = [];
     const wrapper = (handlers: Handler[], el: Element) => {
@@ -1646,10 +1642,10 @@ export class Connection {
    *  Send an xmpp:restart stanza.
    */
   _sendRestart() {
-    this._data.push($build('restart').tree());
-    this._proto._sendRestart();
+    this.data.push($build('restart').tree());
+    this.protocol._sendRestart();
     // @ts-ignore
-    this._idleTimeout = setTimeout(() => this._onIdle(), 100);
+    this.idleTimeout = setTimeout(() => this._onIdle(), 100);
   }
 
   /** PrivateFunction: _onStreamFeaturesAfterSASL
@@ -1812,13 +1808,13 @@ export class Connection {
    */
   _sasl_failure_cb(elem?: Element) {
     // delete unneeded handlers
-    if (this._sasl_success_handler) {
-      this.deleteHandler(this._sasl_success_handler);
-      this._sasl_success_handler = null;
+    if (this.sasl_success_handler) {
+      this.deleteHandler(this.sasl_success_handler);
+      this.sasl_success_handler = null;
     }
-    if (this._sasl_challenge_handler) {
-      this.deleteHandler(this._sasl_challenge_handler);
-      this._sasl_challenge_handler = null;
+    if (this.sasl_challenge_handler) {
+      this.deleteHandler(this.sasl_challenge_handler);
+      this.sasl_challenge_handler = null;
     }
 
     if (this._sasl_mechanism) {
@@ -1875,11 +1871,11 @@ export class Connection {
   setProtocol(): void {
     const proto = this.options.protocol || '';
     if (this.options.worker) {
-      this._proto = new WorkerWebsocket(this);
+      this.protocol = new WorkerWebsocket(this);
     } else if (this.service.indexOf('ws:') === 0 || this.service.indexOf('wss:') === 0 || proto.indexOf('ws') === 0) {
-      this._proto = new StropheWebsocket(this);
+      this.protocol = new StropheWebsocket(this);
     } else {
-      this._proto = new Bosh(this);
+      this.protocol = new Bosh(this);
     }
   }
 
@@ -1895,7 +1891,7 @@ export class Connection {
   _onDisconnectTimeout(): false {
     debug('_onDisconnectTimeout was called');
     this._changeConnectStatus(Status.CONNTIMEOUT, null);
-    this._proto._onDisconnectTimeout();
+    this.protocol._onDisconnectTimeout();
     // actually disconnect
     this._doDisconnect();
     return false;
@@ -1914,8 +1910,8 @@ export class Connection {
    */
   _changeConnectStatus(status: number, condition?: string, elem?: Element): void {
     // notify all plugins listening for status changes
-    for (const k in _connectionPlugins) {
-      if (Object.prototype.hasOwnProperty.call(_connectionPlugins, k)) {
+    for (const k in connectionPlugins) {
+      if (Object.prototype.hasOwnProperty.call(connectionPlugins, k)) {
         const plugin = this[k];
         if (plugin.statusChanged) {
           try {
@@ -1952,14 +1948,14 @@ export class Connection {
    */
   _dataRecv(req: Element, raw?: string): void {
     // @ts-ignore
-    const elem = this._proto._reqToData(req);
+    const elem = this.protocol._reqToData(req);
     if (elem === null) {
       return;
     }
 
     if (this.xmlInput !== Connection.prototype.xmlInput) {
       // @ts-ignore
-      if (elem.nodeName === this._proto.strip && elem.childNodes.length) {
+      if (elem.nodeName === this.protocol.strip && elem.childNodes.length) {
         this.xmlInput(elem.childNodes[0]);
       } else {
         this.xmlInput(elem);
@@ -1988,7 +1984,7 @@ export class Connection {
     }
 
     // handle graceful disconnect
-    if (this.disconnecting && this._proto._emptyQueue()) {
+    if (this.disconnecting && this.protocol._emptyQueue()) {
       this._doDisconnect();
       return;
     }
@@ -2104,13 +2100,13 @@ export class Connection {
       }
     }
     this.timedHandlers = newList;
-    clearTimeout(this._idleTimeout);
-    this._proto._onIdle();
+    clearTimeout(this.idleTimeout);
+    this.protocol._onIdle();
 
     // reactivate the timer only if connected
     if (this.connected) {
       // @ts-ignore
-      this._idleTimeout = setTimeout(() => this._onIdle(), 100);
+      this.idleTimeout = setTimeout(() => this._onIdle(), 100);
     }
   }
 
@@ -2138,7 +2134,7 @@ export class Connection {
     let bodyWrap: Element;
     try {
       // @ts-ignore
-      bodyWrap = this._proto._reqToData(req);
+      bodyWrap = this.protocol._reqToData(req);
     } catch (e) {
       if (e.name !== ErrorCondition.BAD_FORMAT) {
         throw e;
@@ -2152,7 +2148,7 @@ export class Connection {
 
     if (this.xmlInput !== Connection.prototype.xmlInput) {
       // @ts-ignore
-      if (bodyWrap.nodeName === this._proto.strip && bodyWrap.childNodes.length) {
+      if (bodyWrap.nodeName === this.protocol.strip && bodyWrap.childNodes.length) {
         this.xmlInput(bodyWrap.childNodes[0] as Element);
       } else {
         this.xmlInput(bodyWrap);
@@ -2166,7 +2162,7 @@ export class Connection {
       }
     }
 
-    const conncheck = this._proto._connect_cb(bodyWrap);
+    const conncheck = this.protocol._connect_cb(bodyWrap);
     if (conncheck === Status.CONNFAIL) {
       return;
     }
@@ -2179,7 +2175,7 @@ export class Connection {
       hasFeatures = bodyWrap.getElementsByTagName('stream:features').length > 0 || bodyWrap.getElementsByTagName('features').length > 0;
     }
     if (!hasFeatures) {
-      this._proto._no_auth_received(_callback);
+      this.protocol._no_auth_received(_callback);
       return;
     }
 
@@ -2191,7 +2187,7 @@ export class Connection {
       if (bodyWrap.getElementsByTagName('auth').length === 0) {
         // There are no matching SASL mechanisms and also no legacy
         // auth available.
-        this._proto._no_auth_received(_callback);
+        this.protocol._no_auth_received(_callback);
         return;
       }
     }
@@ -2200,12 +2196,12 @@ export class Connection {
     }
   }
 
-  private _queueData(element: Element) {
+  private _queueData(element: Element): void {
     if (element === null || !element.tagName || !element.childNodes) {
       const stropheError = new Error('Cannot queue non-DOMElement.');
       stropheError.name = 'StropheError';
       throw stropheError;
     }
-    this._data.push(element);
+    this.data.push(element);
   }
 }

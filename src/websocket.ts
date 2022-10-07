@@ -406,7 +406,7 @@ export class StropheWebsocket {
    *  sends all queued stanzas
    */
   _onIdle() {
-    const data = this._conn._data;
+    const data = this._conn.data;
     if (data.length > 0 && !this._conn.paused) {
       for (const dataPart of data) {
         if (dataPart !== null) {
@@ -417,7 +417,7 @@ export class StropheWebsocket {
           this.socket.send(rawStanza);
         }
       }
-      this._conn._data = [];
+      this._conn.data = [];
     }
   }
 
@@ -526,7 +526,7 @@ export class StropheWebsocket {
    *  Send an xmpp:restart stanza.
    */
   _sendRestart() {
-    clearTimeout(this._conn._idleTimeout);
+    clearTimeout(this._conn.idleTimeout);
     this._conn._onIdle.bind(this._conn)();
   }
 }

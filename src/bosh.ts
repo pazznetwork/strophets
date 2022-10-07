@@ -404,7 +404,7 @@ export class Bosh {
    *  Sends all queued Requests or polls with empty Request if there are none.
    */
   _onIdle() {
-    const data = this._conn._data;
+    const data = this._conn.data;
     // if no requests are in progress, poll
     if (this._conn.authenticated && this._requests.length === 0 && data.length === 0 && !this._conn.disconnecting) {
       debug('no requests during idle cycle, sending blank request');
@@ -429,8 +429,8 @@ export class Bosh {
           'xmlns:xmpp': NS.BOSH
         });
       }
-      delete this._conn._data;
-      this._conn._data = [];
+      delete this._conn.data;
+      this._conn.data = [];
       this._requests.push(
         new Request(
           body.tree(),
@@ -741,10 +741,10 @@ export class Bosh {
    * Just triggers the RequestHandler to send the messages that are in the queue
    */
   _send() {
-    clearTimeout(this._conn._idleTimeout);
+    clearTimeout(this._conn.idleTimeout);
     this._throttledRequestHandler();
     // @ts-ignore
-    this._conn._idleTimeout = setTimeout(() => this._conn._onIdle(), 100);
+    this._conn.idleTimeout = setTimeout(() => this._conn._onIdle(), 100);
   }
 
   /** PrivateFunction: _sendRestart
@@ -753,7 +753,7 @@ export class Bosh {
    */
   _sendRestart() {
     this._throttledRequestHandler();
-    clearTimeout(this._conn._idleTimeout);
+    clearTimeout(this._conn.idleTimeout);
   }
 
   /** PrivateFunction: _throttledRequestHandler

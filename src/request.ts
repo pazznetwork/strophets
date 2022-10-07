@@ -49,7 +49,7 @@ export class Request {
    *    @param sends - The number of times this same request has been sent.
    */
   constructor(elem: Element, func: (req: Request) => void, readonly rid: number, readonly sends = 0) {
-    this.id = ++Connection._requestId;
+    this.id = ++Connection.requestId;
     this.xmlData = elem;
     this.data = serialize(elem);
     // save original function in case we need to make a new request
