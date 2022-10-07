@@ -22,7 +22,7 @@ enum Status {
  * Manages the shared websocket connection as well as the ports of the
  * connected tabs.
  */
-class ConnectionManager {
+export class ConnectionManager {
   ports: MessagePort[];
   jid: any;
   socket: any;

@@ -5,7 +5,7 @@ import { $build } from './builder-helper';
 import { getBareJidFromJid, getDomainFromJid, getNodeFromJid } from './xml';
 import { debug, error, warn } from './log';
 import { Status } from './status';
-import { Builder } from './builder';
+import { SECONDARY_TIMEOUT, TIMEOUT } from './timeout';
 
 export const BOSH_WAIT = 59;
 

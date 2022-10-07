@@ -12,5 +12,5 @@
  *      Math.floor(SECONDARY_TIMEOUT * wait) seconds have elapsed.
  *      This defaults to 0.1, and with default wait, 6 seconds.
  */
-const TIMEOUT = 1.1;
-const SECONDARY_TIMEOUT = 0.1;
+export const TIMEOUT = 1.1;
+export const SECONDARY_TIMEOUT = 0.1;
