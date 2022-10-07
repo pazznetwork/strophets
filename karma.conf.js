@@ -1,24 +1,47 @@
 /* global module */
 
 // @ts-ignore
-module.exports = function (config) {
+module.exports = function(config) {
   config.set({
     // base path that will be used to resolve all patterns (eg. files, exclude)
     basePath: '',
     // frameworks to use
     // available frameworks: https://npmjs.org/browse/keyword/karma-adapter
-    frameworks: ['jasmine'],
+    frameworks: ['jasmine', 'karma-typescript'],
 
     // list of files / patterns to load in the browser
-    files: ['dist/index.js', 'tests.ts'],
+    files: ['src/**/*.ts'],
+
+    plugins: [
+      require('karma-jasmine'),
+      require('karma-chrome-launcher'),
+      require('karma-jasmine-html-reporter'),
+      require('karma-coverage'),
+      require('karma-typescript')
+    ],
+
+    karmaTypescriptConfig: {
+      bundlerOptions: {
+        transforms: [
+          require("karma-typescript-es6-transform")()
+        ]
+      },
+      compilerOptions: {
+        target: 'es2020'
+      }
+    },
+
+    preprocessors: {
+      '**/*.ts': 'karma-typescript' // *.tsx for React Jsx
+    },
 
     // list of files to exclude
-    exclude: [],
+    exclude: ['node_modules', 'src/shared-connection-worker.ts'],
 
     // test results reporter to use
     // possible values: 'dots', 'progress'
     // available reporters: https://npmjs.org/browse/keyword/karma-reporter
-    reporters: ['progress'],
+    reporters: ['progress', 'karma-typescript'],
     client: {},
 
     // web server port

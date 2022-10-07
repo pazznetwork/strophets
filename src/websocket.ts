@@ -21,6 +21,7 @@ export class StropheWebsocket {
   protected get socket(): WebSocket {
     return this._socket;
   }
+
   protected set socket(value: WebSocket) {
     this._socket = value;
   }
@@ -100,7 +101,8 @@ export class StropheWebsocket {
     let text = '';
 
     const ns = 'urn:ietf:params:xml:ns:xmpp-streams';
-    for (const errorNode of Array.from(receivedError.childNodes)) {
+    const errorNodes: ChildNode[] = Array.from(receivedError.childNodes);
+    for (const errorNode of errorNodes) {
       if ((errorNode as Element).getAttribute('xmlns') !== ns) {
         break;
       }

@@ -444,7 +444,7 @@ export function serialize(el: Element | Builder | { tree: () => Element }): stri
     return null;
   }
   const elem: Element = !(el instanceof Element) ? el.tree() : el;
-  const names = Array.from(elem.attributes).map((attribute) => attribute.nodeName);
+  const names = Array.from(elem.attributes).map((attribute) => attribute.localName);
   names.sort();
   let result = names.reduce((a, n) => `${a} ${n}="${xmlescape(elem.attributes.getNamedItem(n).value)}"`, `<${elem.nodeName}`);
 

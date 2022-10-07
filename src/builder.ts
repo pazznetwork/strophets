@@ -204,7 +204,7 @@ export class Builder implements BuilderDefinition {
    *  Returns:
    *    @returns A new Strophe.Builder.
    */
-  constructor(name: string, attrs?: Record<string, unknown>) {
+  constructor(name: string, attrs?: Record<string, string>) {
     // Set correct namespace for jabber:client elements
     if (name === 'presence' || name === 'message' || name === 'iq') {
       if (attrs && !attrs.xmlns) {
@@ -214,7 +214,7 @@ export class Builder implements BuilderDefinition {
       }
     }
     // Holds the tree being built.
-    this.nodeTree = xmlElement(name, attrs);
+    this.nodeTree = xmlElement(name, { attrs });
     // Points to the current operation node.
     this.node = this.nodeTree;
   }

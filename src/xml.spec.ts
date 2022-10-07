@@ -998,3 +998,22 @@ test("nextValidRid is called after connection reset", (assert) => {
 });
 
 */
+
+import { $build, NS, serialize } from './index';
+
+describe('ensure xml serialization', () => {
+  it('serialize should return correct string for open element', () => {
+    const version = '1.0';
+    const to = 'xmpp-lover.org';
+    const serialized = serialize(
+      $build('open', {
+        xmlns: NS.FRAMING,
+        to,
+        version
+      })
+    );
+    expect(serialized).toContain(version);
+    expect(serialized).toContain(to);
+    expect(serialized).toContain(version);
+  });
+});
