@@ -7,10 +7,10 @@ module.exports = function (config) {
     basePath: '',
     // frameworks to use
     // available frameworks: https://npmjs.org/browse/keyword/karma-adapter
-    frameworks: ['qunit'],
+    frameworks: ['jasmine'],
 
     // list of files / patterns to load in the browser
-    files: ['node_modules/sinon/pkg/sinon.js', 'dist/strophe.umd.js', 'tests.js'],
+    files: ['dist/index.js', 'tests.ts'],
 
     // list of files to exclude
     exclude: [],

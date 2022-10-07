@@ -1,4 +1,4 @@
-# Strophe.js Change Log
+# Strophe.ts Change Log
 
 ## Version 1.6.0 - (Unreleased)
 

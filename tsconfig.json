@@ -1,10 +1,10 @@
 {
   "compileOnSave": false,
   "compilerOptions": {
-    "baseUrl": "./",
-    "outDir": "./dist",
-    "sourceMap": true,
-    "declaration": false,
+    "rootDir": "src",
+    "outDir": "./dist/main",
+    "inlineSourceMap": true,
+    "declaration": true,
     "downlevelIteration": true,
     "experimentalDecorators": true,
     "moduleResolution": "node",
@@ -15,6 +15,7 @@
       "es2020",
       "dom"
     ],
+    "strict": false,
     "noEmitHelpers": true,
     "allowUnreachableCode": false,
     "noFallthroughCasesInSwitch": true,
@@ -30,5 +31,14 @@
     "esModuleInterop": true,
     "preserveSymlinks": true,
     "resolveJsonModule": true,
+    "typeRoots": [
+      "node_modules/@types"
+    ]
   },
+  "include": [
+    "src/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules/**"
+  ]
 }
