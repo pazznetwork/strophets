@@ -46,7 +46,7 @@ export interface MatcherConfig {
   /**
    * namespace not to match against, muc vs default messaging
    */
-  noNS: string;
+  noNS?: string;
 }
 
 export class Matcher {
@@ -61,7 +61,7 @@ export class Matcher {
    *
    * @param config how to match against stanzas
    */
-  constructor(config: MatcherConfig) {
+  constructor(config?: MatcherConfig) {
     this.config = { matchBareFromJid: false, ignoreNamespaceFragment: false, ...config };
     const { from } = config;
     if (this.config.matchBareFromJid) {
