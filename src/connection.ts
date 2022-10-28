@@ -181,15 +181,7 @@ export class Connection {
    *    @returns A new Strophe.Connection object.
    */
   constructor(public service: string, readonly options?: ConnectionOptions) {
-    const proto = this.options.protocol || '';
-    if (this.options.worker) {
-      this.protocolManager = new WorkerWebsocket(this, this.stanzasInSubject);
-    } else if (this.service.indexOf('ws:') === 0 || this.service.indexOf('wss:') === 0 || proto.indexOf('ws') === 0) {
-      this.protocolManager = new StropheWebsocket(this, this.stanzasInSubject);
-    } else {
-      this.protocolManager = new Bosh(this);
-    }
-
+    this.setProtocol();
     /* stream:features */
     this.features = null;
 
@@ -262,6 +254,20 @@ export class Connection {
       const plugin = new value();
       plugin.init(this);
       this[key] = plugin;
+    }
+  }
+
+  /** Function: setProtocol
+   *  Select protocol based on this.options or this.service
+   */
+  setProtocol(): void {
+    const proto = this.options.protocol || '';
+    if (this.options.worker) {
+      this.protocolManager = new WorkerWebsocket(this, this.stanzasInSubject);
+    } else if (this.service.indexOf('ws:') === 0 || this.service.indexOf('wss:') === 0 || proto.indexOf('ws') === 0) {
+      this.protocolManager = new StropheWebsocket(this, this.stanzasInSubject);
+    } else {
+      this.protocolManager = new Bosh(this);
     }
   }
 
