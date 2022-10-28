@@ -6,17 +6,13 @@ import { getBareJidFromJid, getDomainFromJid, getNodeFromJid } from './xml';
 import { debug, error, warn } from './log';
 import { Status } from './status';
 import { SECONDARY_TIMEOUT, TIMEOUT } from './timeout';
+import { ProtocolManager } from './protocol-manager';
 
-export const BOSH_WAIT = 59;
-
-/** Class: Strophe.Bosh
- *  _Private_ helper class that handles BOSH Connections
- *
- *  The Strophe.Bosh class is used internally by Strophe.Connection
- *  to encapsulate BOSH sessions. It is not meant to be used from user's code.
+/**
+ *  The Bosh class is used internally by the Connection class to encapsulate BOSH sessions.
  */
-export class Bosh {
-  private _conn: Connection;
+export class Bosh implements ProtocolManager {
+  readonly connection: Connection;
   rid = Math.floor(Math.random() * 4294967295);
   private sid: string = null;
 
@@ -28,8 +24,8 @@ export class Bosh {
   private inactivity: number;
 
   private lastResponseHeaders: string;
-  private _requests: any[];
-  strip: boolean;
+  private readonly _requests: any[];
+  strip: string;
 
   /** PrivateConstructor: Strophe.Bosh
    *  Create and initialize a Strophe.Bosh object.
@@ -42,7 +38,7 @@ export class Bosh {
    *    @returns A new Strophe.Bosh object.
    */
   constructor(connection: Connection) {
-    this._conn = connection;
+    this.connection = connection;
     /* request id for body tags */
     this.rid = Math.floor(Math.random() * 4294967295);
     /* The current session ID. */
@@ -71,7 +67,7 @@ export class Bosh {
     this.errors = 0;
 
     const body = this._buildBody().attrs({
-      to: this._conn.domain,
+      to: this.connection.domain,
       'xml:lang': 'en',
       wait: this.wait.toString(10),
       hold: this.hold.toString(10),
@@ -85,11 +81,11 @@ export class Bosh {
     }
 
     // eslint-disable-next-line @typescript-eslint/unbound-method
-    const _connect_cb = this._conn._connect_cb;
+    const _connect_cb = this.connection._connect_cb;
     this._requests.push(
       new Request(
         body.tree(),
-        this._onRequestStateChange.bind(this, _connect_cb.bind(this._conn)),
+        this._onRequestStateChange.bind(this, _connect_cb.bind(this.connection)),
         Number.parseInt(body.tree().getAttribute('rid'), 10)
       )
     );
@@ -110,7 +106,7 @@ export class Bosh {
     if (this.sid !== null) {
       bodyWrap.attrs({ sid: this.sid });
     }
-    if (this._conn.options.keepalive && this._conn._sessionCachingSupported()) {
+    if (this.connection.options.keepalive && this.connection._sessionCachingSupported()) {
       this._cacheSession();
     }
     return bodyWrap;
@@ -121,15 +117,15 @@ export class Bosh {
    *
    *  This function is called by the reset function of the Strophe Connection
    */
-  _reset() {
+  reset() {
     this.rid = Math.floor(Math.random() * 4294967295);
     this.sid = null;
     this.errors = 0;
-    if (this._conn._sessionCachingSupported()) {
+    if (this.connection._sessionCachingSupported()) {
       window.sessionStorage.removeItem('strophe-bosh-session');
     }
 
-    this._conn.nextValidRid(this.rid);
+    this.connection.nextValidRid(this.rid);
   }
 
   /** PrivateFunction: _attach
@@ -157,20 +153,20 @@ export class Bosh {
    *      allowed range of request ids that are valid.  The default is 5.
    */
   _attach(jid: string, sid: string, rid: number, callback: () => void, wait: number, hold: number, wind: number) {
-    this._conn.jid = jid;
+    this.connection.jid = jid;
     this.sid = sid;
     this.rid = rid;
 
-    this._conn.connect_callback = callback;
-    this._conn.domain = getDomainFromJid(this._conn.jid);
-    this._conn.authenticated = true;
-    this._conn.connected = true;
+    this.connection.connect_callback = callback;
+    this.connection.domain = getDomainFromJid(this.connection.jid);
+    this.connection.authenticated = true;
+    this.connection.connected = true;
 
     this.wait = wait || this.wait;
     this.hold = hold || this.hold;
     this.window = wind || this.window;
 
-    this._conn._changeConnectStatus(Status.ATTACHED, null);
+    this.connection._changeConnectStatus(Status.ATTACHED, null);
   }
 
   /** PrivateFunction: _restore
@@ -207,7 +203,7 @@ export class Bosh {
         // we compare only the domains:
         (getNodeFromJid(jid) === null && getDomainFromJid(session.jid) === jid))
     ) {
-      this._conn.restored = true;
+      this.connection.restored = true;
       this._attach(session.jid, session.sid, session.rid, callback, wait, hold, wind);
     } else {
       const namedError = new Error('_restore: no restoreable session.');
@@ -224,12 +220,12 @@ export class Bosh {
    *    (Strophe.Request) bodyWrap - The received stanza.
    */
   _cacheSession() {
-    if (this._conn.authenticated) {
-      if (this._conn.jid && this.rid && this.sid) {
+    if (this.connection.authenticated) {
+      if (this.connection.jid && this.rid && this.sid) {
         window.sessionStorage.setItem(
           'strophe-bosh-session',
           JSON.stringify({
-            jid: this._conn.jid,
+            jid: this.connection.jid,
             rid: this.rid,
             sid: this.sid
           })
@@ -258,11 +254,11 @@ export class Bosh {
         if (cond === 'remote-stream-error' && conflict.length > 0) {
           cond = 'conflict';
         }
-        this._conn._changeConnectStatus(Status.CONNFAIL, cond);
+        this.connection._changeConnectStatus(Status.CONNFAIL, cond);
       } else {
-        this._conn._changeConnectStatus(Status.CONNFAIL, 'unknown');
+        this.connection._changeConnectStatus(Status.CONNFAIL, 'unknown');
       }
-      this._conn._doDisconnect(cond);
+      this.connection._doDisconnect(cond);
       return Status.CONNFAIL;
     }
 
@@ -309,11 +305,11 @@ export class Bosh {
   _doDisconnect() {
     this.sid = null;
     this.rid = Math.floor(Math.random() * 4294967295);
-    if (this._conn._sessionCachingSupported()) {
+    if (this.connection._sessionCachingSupported()) {
       window.sessionStorage.removeItem('strophe-bosh-session');
     }
 
-    this._conn.nextValidRid(this.rid);
+    this.connection.nextValidRid(this.rid);
   }
 
   /** PrivateFunction: _emptyQueue
@@ -334,7 +330,7 @@ export class Bosh {
    */
   _callProtocolErrorHandlers(req: Request) {
     const reqStatus = Bosh._getRequestStatus(req);
-    const err_callback = this._conn.protocolErrorHandlers.HTTP[reqStatus];
+    const err_callback = this.connection.protocolErrorHandlers.HTTP[reqStatus];
     if (err_callback) {
       err_callback.call(this, reqStatus);
     }
@@ -354,7 +350,7 @@ export class Bosh {
     this.errors++;
     warn('request errored, status: ' + reqStatus + ', number of errors: ' + this.errors);
     if (this.errors > 4) {
-      this._conn._onDisconnectTimeout();
+      this.connection._onDisconnectTimeout();
     }
   }
 
@@ -366,9 +362,9 @@ export class Bosh {
   _no_auth_received(callback: () => void) {
     warn('Server did not yet offer a supported authentication ' + 'mechanism. Sending a blank poll request.');
     if (callback) {
-      callback = callback.bind(this._conn);
+      callback = callback.bind(this.connection);
     } else {
-      callback = this._conn._connect_cb.bind(this._conn);
+      callback = this.connection._connect_cb.bind(this.connection);
     }
     const body = this._buildBody();
     this._requests.push(
@@ -394,7 +390,7 @@ export class Bosh {
       const req = this._requests.pop();
       req.abort = true;
       req.xhr.abort();
-      req.xhr.onreadystatechange = function () {};
+      req.xhr.onreadystatechange = () => {};
     }
   }
 
@@ -404,14 +400,14 @@ export class Bosh {
    *  Sends all queued Requests or polls with empty Request if there are none.
    */
   _onIdle() {
-    const data = this._conn.data;
+    const data = this.connection.data;
     // if no requests are in progress, poll
-    if (this._conn.authenticated && this._requests.length === 0 && data.length === 0 && !this._conn.disconnecting) {
+    if (this.connection.authenticated && this._requests.length === 0 && data.length === 0 && !this.connection.disconnecting) {
       debug('no requests during idle cycle, sending blank request');
       data.push(null);
     }
 
-    if (this._conn.paused) {
+    if (this.connection.paused) {
       return;
     }
 
@@ -423,18 +419,18 @@ export class Bosh {
           continue;
         }
         body.attrs({
-          to: this._conn.domain,
+          to: this.connection.domain,
           'xml:lang': 'en',
           'xmpp:restart': 'true',
           'xmlns:xmpp': NS.BOSH
         });
       }
-      delete this._conn.data;
-      this._conn.data = [];
+      delete this.connection.data;
+      this.connection.data = [];
       this._requests.push(
         new Request(
           body.tree(),
-          this._onRequestStateChange.bind(this, this._conn._dataRecv.bind(this._conn)),
+          this._onRequestStateChange.bind(this, this.connection._dataRecv.bind(this.connection)),
           Number.parseInt(body.tree().getAttribute('rid'), 10)
         )
       );
@@ -504,7 +500,7 @@ export class Bosh {
     }
     const reqStatus = Bosh._getRequestStatus(req);
     this.lastResponseHeaders = req.xhr.getAllResponseHeaders();
-    if (this._conn.disconnecting && reqStatus >= 400) {
+    if (this.connection.disconnecting && reqStatus >= 400) {
       this._hitError(reqStatus);
       this._callProtocolErrorHandlers(req);
       return;
@@ -514,7 +510,7 @@ export class Bosh {
     const reqIs1 = this._requests[1] === req;
 
     const valid_request = reqStatus > 0 && reqStatus < 500;
-    const too_many_retries = req.sends > this._conn.maxRetries;
+    const too_many_retries = req.sends > this.connection.maxRetries;
     if (valid_request || too_many_retries) {
       // remove from internal queue
       this._removeRequest(req);
@@ -530,7 +526,7 @@ export class Bosh {
       if (reqIs1 || (reqIs0 && this._requests.length > 0 && this._requests[0].age() > Math.floor(SECONDARY_TIMEOUT * this.wait))) {
         this._restartRequest(0);
       }
-      this._conn.nextValidRid(Number(req.rid) + 1);
+      this.connection.nextValidRid(Number(req.rid) + 1);
       debug('request id ' + req.id + '.' + req.sends + ' got 200');
       func(req); // call handler
       this.errors = 0;
@@ -540,8 +536,8 @@ export class Bosh {
       this._hitError(reqStatus);
       this._callProtocolErrorHandlers(req);
       if (reqStatus >= 400 && reqStatus < 500) {
-        this._conn._changeConnectStatus(Status.DISCONNECTING, null);
-        this._conn._doDisconnect();
+        this.connection._changeConnectStatus(Status.DISCONNECTING, null);
+        this.connection._doDisconnect();
       }
     } else {
       error('request id ' + req.id + '.' + req.sends + ' error ' + reqStatus + ' happened');
@@ -549,8 +545,8 @@ export class Bosh {
 
     if (!valid_request && !too_many_retries) {
       this._throttledRequestHandler();
-    } else if (too_many_retries && !this._conn.connected) {
-      this._conn._changeConnectStatus(Status.CONNFAIL, 'giving-up');
+    } else if (too_many_retries && !this.connection.connected) {
+      this.connection._changeConnectStatus(Status.CONNFAIL, 'giving-up');
     }
   }
 
@@ -568,8 +564,8 @@ export class Bosh {
     const reqStatus = Bosh._getRequestStatus(req, -1);
 
     // make sure we limit the number of retries
-    if (req.sends > this._conn.maxRetries) {
-      this._conn._onDisconnectTimeout();
+    if (req.sends > this.connection.maxRetries) {
+      this.connection._onDisconnectTimeout();
       return;
     }
     const time_elapsed = req.age();
@@ -584,7 +580,7 @@ export class Bosh {
       req.abort = true;
       req.xhr.abort();
       // setting to null fails on IE6, so set to empty function
-      req.xhr.onreadystatechange = function () {};
+      req.xhr.onreadystatechange = () => {};
       this._requests[i] = new Request(req.xmlData, req.origFunc, req.rid, req.sends);
       req = this._requests[i];
     }
@@ -593,21 +589,21 @@ export class Bosh {
       debug('request id ' + req.id + '.' + req.sends + ' posting');
 
       try {
-        const content_type = this._conn.options.contentType || 'text/xml; charset=utf-8';
-        req.xhr.open('POST', this._conn.service, !this._conn.options.sync);
+        const content_type = this.connection.options.contentType || 'text/xml; charset=utf-8';
+        req.xhr.open('POST', this.connection.service, !this.connection.options.sync);
         if (typeof req.xhr.setRequestHeader !== 'undefined') {
           // IE9 doesn't have setRequestHeader
           req.xhr.setRequestHeader('Content-Type', content_type);
         }
-        if (this._conn.options.withCredentials) {
+        if (this.connection.options.withCredentials) {
           req.xhr.withCredentials = true;
         }
       } catch (e2) {
         error('XHR open failed: ' + e2.toString());
-        if (!this._conn.connected) {
-          this._conn._changeConnectStatus(Status.CONNFAIL, 'bad-service');
+        if (!this.connection.connected) {
+          this.connection._changeConnectStatus(Status.CONNFAIL, 'bad-service');
         }
-        this._conn.disconnect();
+        this.connection.disconnect();
         return;
       }
 
@@ -615,8 +611,8 @@ export class Bosh {
       // or on a gradually expanding retry window for reconnects
       const sendFunc = () => {
         req.date = new Date();
-        if (this._conn.options.customHeaders) {
-          const headers = this._conn.options.customHeaders;
+        if (this.connection.options.customHeaders) {
+          const headers = this.connection.options.customHeaders;
           for (const header in headers) {
             if (Object.prototype.hasOwnProperty.call(headers, header)) {
               req.xhr.setRequestHeader(header, headers[header]);
@@ -642,15 +638,10 @@ export class Bosh {
 
       req.sends++;
 
-      if (this._conn.xmlOutput !== Connection.prototype.xmlOutput) {
-        if (req.xmlData.nodeName === this.strip && req.xmlData.childNodes.length) {
-          this._conn.xmlOutput(req.xmlData.childNodes[0]);
-        } else {
-          this._conn.xmlOutput(req.xmlData);
-        }
-      }
-      if (this._conn.rawOutput !== Connection.prototype.rawOutput) {
-        this._conn.rawOutput(req.data);
+      if (req.xmlData.nodeName === this.strip && req.xmlData.childNodes.length) {
+        this.connection.xmlOutput(req.xmlData.childNodes[0]);
+      } else {
+        this.connection.xmlOutput(req.xmlData);
       }
     } else {
       debug('_processRequest: ' + (i === 0 ? 'first' : 'second') + ' request has readyState of ' + req.xhr.readyState);
@@ -671,7 +662,7 @@ export class Bosh {
       }
     }
     // IE6 fails on setting to null, so set to empty function
-    req.xhr.onreadystatechange = function () {};
+    req.xhr.onreadystatechange = () => {};
     this._throttledRequestHandler();
   }
 
@@ -708,7 +699,7 @@ export class Bosh {
       if (e.message !== 'parsererror') {
         throw e;
       }
-      this._conn.disconnect('strophe-parsererror');
+      this.connection.disconnect('strophe-parsererror');
     }
     return null;
   }
@@ -728,7 +719,7 @@ export class Bosh {
     }
     const req = new Request(
       body.tree(),
-      this._onRequestStateChange.bind(this, this._conn._dataRecv.bind(this._conn)),
+      this._onRequestStateChange.bind(this, this.connection._dataRecv.bind(this.connection)),
       Number.parseInt(body.tree().getAttribute('rid'), 10)
     );
     this._requests.push(req);
@@ -741,10 +732,10 @@ export class Bosh {
    * Just triggers the RequestHandler to send the messages that are in the queue
    */
   _send() {
-    clearTimeout(this._conn.idleTimeout);
+    clearTimeout(this.connection.idleTimeout);
     this._throttledRequestHandler();
     // @ts-ignore
-    this._conn.idleTimeout = setTimeout(() => this._conn._onIdle(), 100);
+    this.connection.idleTimeout = setTimeout(() => this.connection._onIdle(), 100);
   }
 
   /** PrivateFunction: _sendRestart
@@ -753,7 +744,7 @@ export class Bosh {
    */
   _sendRestart() {
     this._throttledRequestHandler();
-    clearTimeout(this._conn.idleTimeout);
+    clearTimeout(this.connection.idleTimeout);
   }
 
   /** PrivateFunction: _throttledRequestHandler
@@ -795,4 +786,4 @@ export class Bosh {
  *  This will enable stripping of the body tag in both
  *  <Strophe.Connection.xmlInput> and <Strophe.Connection.xmlOutput>.
  */
-Bosh.prototype.strip = false;
+Bosh.prototype.strip = 'false';

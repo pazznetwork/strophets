@@ -5,7 +5,7 @@ import { Status } from './status';
 import { Builder } from './builder';
 import { addCookies } from './utils';
 import { NS } from './namespace';
-import { forEachChild, getBareJidFromJid, getDomainFromJid, getNodeFromJid, getResourceFromJid, getText, serialize } from './xml';
+import { forEachChild, getBareJidFromJid, getDomainFromJid, getNodeFromJid, getResourceFromJid, getText } from './xml';
 import { ErrorCondition, handleError } from './error';
 import { $build, $iq, $pres } from './builder-helper';
 import { debug, error, info, log, LogLevel, warn } from './log';
@@ -23,6 +23,9 @@ import { SASLSHA1 } from './sasl-sha1';
 import { SASLSHA256 } from './sasl-sha256';
 import { SASLSHA384 } from './sasl-sha384';
 import { SASLSHA512 } from './sasl-sha512';
+import { ProtocolManager } from './protocol-manager';
+import { filter, Observable, share, Subject } from 'rxjs';
+import { Matcher, MatcherConfig } from './matcher';
 
 /** PrivateVariable: connectionPlugins
  *  _Private_ variable Used to store plugin names that need
@@ -41,23 +44,7 @@ export function addConnectionPlugin(name: string, ptype: new () => object): void
   connectionPlugins[name] = ptype;
 }
 
-/**
- * Options for the Strophe Connection
- *  shared options between WebSocket and BOSH are:
- *   - cookies
- *   - mechanisms (for SASL)
- *   - explicitResourceBinding (to have additional step for connections setups)
- *  WebSocket only:
- *   - protocol (upgrade current protocol to ws or wss)
- *   - worker (url to load the worker script from, for example for shared sessions)
- *  BOSH only:
- *   - sync (make requests synchronous)
- *   - customHeaders (add custom headers to requests)
- *   - keepalive (store session data for reconnections)
- *   - withCredentials (if you need to add auth cookies to ajax requests)
- *   - contentType (default is "text/xml; charset=utf-8")
- */
-export interface ConnectionOptions {
+export interface WebsocketOptions {
   /**
    * cookies - Common option for Websocket and Bosh:
    *  The *cookies* option allows you to pass in cookies to be added to the
@@ -115,7 +102,7 @@ export interface ConnectionOptions {
    * protocol - WebSocket option:
    *  If you want to connect to the current host with a WebSocket connection you
    *  can tell Strophe to use WebSockets through a "protocol" attribute in the
-   *  optional options parameter. Valid values are "ws" for WebSocket and "wss"
+   *  optional option's parameter. Valid values are "ws" for WebSocket and "wss"
    *  for Secure WebSocket.
    *  So to connect to "wss://CURRENT_HOSTNAME/xmpp-websocket" you would call
    *
@@ -140,6 +127,63 @@ export interface ConnectionOptions {
    *  The script to use is the one in `src/shared-connection-worker.js`.
    */
   worker?: string;
+}
+
+export interface BoshOptions {
+  /**
+   * cookies - Common option for Websocket and Bosh:
+   *  The *cookies* option allows you to pass in cookies to be added to the
+   *  document. These cookies will then be included in the BOSH XMLHttpRequest
+   *  or in the websocket connection.
+   *
+   *  The passed in value must be a map of cookie names and string values.
+   *
+   *  > { "myCookie": {
+   *  >     "value": "1234",
+   *  >     "domain": ".example.org",
+   *  >     "path": "/",
+   *  >     "expires": expirationDate
+   *  >     }
+   *  > }
+   *
+   *  Note that cookies can't be set in this way for other domains (i.e. cross-domain).
+   *  Those cookies need to be set under those domains, for example they can be
+   *  set server-side by making a XHR call to that domain to ask it to set any
+   *  necessary cookies.
+   */
+  cookies?: Record<string, Record<string, string>>;
+  /**
+   * mechanisms - Common option for Websocket and Bosh:
+   *  The *mechanisms* option allows you to specify the SASL mechanisms that this
+   *  instance of Strophe.Connection (and therefore your XMPP client) will
+   *  support.
+   *
+   *  The value must be an array of objects with Strophe.SASLMechanism
+   *  prototypes.
+   *
+   *  If nothing is specified, then the following mechanisms (and their
+   *  priorities) are registered:
+   *
+   *      SCRAM-SHA-1 - 60
+   *      PLAIN       - 50
+   *      OAUTHBEARER - 40
+   *      X-OAUTH2    - 30
+   *      ANONYMOUS   - 20
+   *      EXTERNAL    - 10
+   */
+  mechanisms?: SASLMechanism[];
+  /**
+   * explicitResourceBinding - Common option for Websocket and Bosh:
+   *  If `explicitResourceBinding` is set to a truthy value, then the XMPP client
+   *  needs to explicitly call `Strophe.Connection.prototype.bind` once the XMPP
+   *  server has advertised the "urn:ietf:params:xml:ns:xmpp-bind" feature.
+   *
+   *  Making this step explicit allows client authors to first finish other
+   *  stream related tasks, such as setting up an XEP-0198 Stream Management
+   *  session, before binding the JID resource for this session.
+   */
+  explicitResourceBinding?: boolean;
+
   /**
    * sync - BOSH option:
    *  By adding "sync" to the options, you can control if requests will
@@ -170,13 +214,13 @@ export interface ConnectionOptions {
   /**
    * withCredentials - BOSH option:
    *  The *withCredentials* option should receive a Boolean value and is used to
-   *  indicate wether cookies should be included in ajax requests (by default
+   *  indicate whether cookies should be included in ajax requests (by default
    *  they're not).
    *  Set this value to true if you are connecting to a BOSH service
    *  and for some reason need to send cookies to it.
    *  In order for this to work cross-domain, the server must also enable
    *  credentials by setting the Access-Control-Allow-Credentials response header
-   *  to "true". For most usecases however this setting should be false (which
+   *  to "true". For most use-cases however this setting should be false (which
    *  is the default).
    *  Additionally, when using Access-Control-Allow-Credentials, the
    *  Access-Control-Allow-Origin header can't be set to the wildcard "*", but
@@ -191,6 +235,24 @@ export interface ConnectionOptions {
    */
   contentType?: string;
 }
+
+/**
+ * Options for the Strophe Connection
+ *  shared options between WebSocket and BOSH are:
+ *   - cookies
+ *   - mechanisms (for SASL)
+ *   - explicitResourceBinding (to have additional step for connections setups)
+ *  WebSocket only:
+ *   - protocol (upgrade current protocol to ws or wss)
+ *   - worker (url to load the worker script from, for example for shared sessions)
+ *  BOSH only:
+ *   - sync (make requests synchronous)
+ *   - customHeaders (add custom headers to requests)
+ *   - keepalive (store session data for reconnections)
+ *   - withCredentials (if you need to add auth cookies to ajax requests)
+ *   - contentType (default is "text/xml; charset=utf-8")
+ */
+export interface ConnectionOptions extends BoshOptions, WebsocketOptions {}
 
 /** Class: Strophe.Connection
  *  XMPP Connection manager.
@@ -221,21 +283,13 @@ export class Connection {
   static requestId = 0;
 
   /**
-   * the service url to connect with
-   */
-  service: string;
-  /**
-   * @see ConnectionOptions
-   */
-  options: ConnectionOptions;
-  /**
    * The connected JID.
    */
-  jid: string;
+  jid = '';
   /**
    * The domain of the connected JID.
    */
-  domain: string;
+  domain: string = null;
   features: Element;
 
   // SASL
@@ -289,10 +343,15 @@ export class Connection {
 
   disconnection_timeout: number;
 
+  private stanzasInSubject = new Subject<Element>();
+  stanzasIn$ = this.stanzasInSubject.pipe(share());
+  private stanzasOutSubject = new Subject<Element>();
+  stanzasOut$ = this.stanzasOutSubject.pipe(share());
+
   /**
    * protocol used for connection
    */
-  protocol: StropheWebsocket | Bosh | WorkerWebsocket;
+  protocolManager: ProtocolManager;
 
   worker_attach_promise?: PromiseWrapper<unknown>;
   sasl_data: Record<string, unknown>;
@@ -309,7 +368,7 @@ export class Connection {
   private iqFallbackHandler: Handler;
   private _sasl_mechanism: SASLMechanism;
 
-  /** Constructor: Strophe.Connection
+  /**
    *  Create and initialize a Strophe.Connection object.
    *
    *  The transport-protocol for this connection will be chosen automatically
@@ -320,128 +379,7 @@ export class Connection {
    *  To make Strophe connect to the current host you can leave out the protocol
    *  and host part and just pass the path, e.g.
    *
-   *  > let conn = new Strophe.Connection("/http-bind/");
-   *
-   *  Options common to both Websocket and BOSH:
-   *  ------------------------------------------
-   *
-   *  cookies:
-   *
-   *  The *cookies* option allows you to pass in cookies to be added to the
-   *  document. These cookies will then be included in the BOSH XMLHttpRequest
-   *  or in the websocket connection.
-   *
-   *  The passed in value must be a map of cookie names and string values.
-   *
-   *  > { "myCookie": {
-   *  >     "value": "1234",
-   *  >     "domain": ".example.org",
-   *  >     "path": "/",
-   *  >     "expires": expirationDate
-   *  >     }
-   *  > }
-   *
-   *  Note that cookies can't be set in this way for other domains (i.e. cross-domain).
-   *  Those cookies need to be set under those domains, for example they can be
-   *  set server-side by making a XHR call to that domain to ask it to set any
-   *  necessary cookies.
-   *
-   *  mechanisms:
-   *
-   *  The *mechanisms* option allows you to specify the SASL mechanisms that this
-   *  instance of Strophe.Connection (and therefore your XMPP client) will
-   *  support.
-   *
-   *  The value must be an array of objects with Strophe.SASLMechanism
-   *  prototypes.
-   *
-   *  If nothing is specified, then the following mechanisms (and their
-   *  priorities) are registered:
-   *
-   *      SCRAM-SHA-1 - 60
-   *      PLAIN       - 50
-   *      OAUTHBEARER - 40
-   *      X-OAUTH2    - 30
-   *      ANONYMOUS   - 20
-   *      EXTERNAL    - 10
-   *
-   *  explicitResourceBinding:
-   *
-   *  If `explicitResourceBinding` is set to a truthy value, then the XMPP client
-   *  needs to explicitly call `Strophe.Connection.prototype.bind` once the XMPP
-   *  server has advertised the "urn:ietf:params:xml:ns:xmpp-bind" feature.
-   *
-   *  Making this step explicit allows client authors to first finish other
-   *  stream related tasks, such as setting up an XEP-0198 Stream Management
-   *  session, before binding the JID resource for this session.
-   *
-   *  WebSocket options:
-   *  ------------------
-   *
-   *  protocol:
-   *
-   *  If you want to connect to the current host with a WebSocket connection you
-   *  can tell Strophe to use WebSockets through a "protocol" attribute in the
-   *  optional options parameter. Valid values are "ws" for WebSocket and "wss"
-   *  for Secure WebSocket.
-   *  So to connect to "wss://CURRENT_HOSTNAME/xmpp-websocket" you would call
-   *
-   *  > let conn = new Strophe.Connection("/xmpp-websocket/", {protocol: "wss"});
-   *
-   *  Note that relative URLs _NOT_ starting with a "/" will also include the path
-   *  of the current site.
-   *
-   *  Also because downgrading security is not permitted by browsers, when using
-   *  relative URLs both BOSH and WebSocket connections will use their secure
-   *  variants if the current connection to the site is also secure (https).
-   *
-   *  worker:
-   *
-   *  Set this option to URL from where the shared worker script should be loaded.
-   *
-   *  To run the websocket connection inside a shared worker.
-   *  This allows you to share a single websocket-based connection between
-   *  multiple Strophe.Connection instances, for example one per browser tab.
-   *
-   *  The script to use is the one in `src/shared-connection-worker.js`.
-   *
-   *  BOSH options:
-   *  -------------
-   *
-   *  By adding "sync" to the options, you can control if requests will
-   *  be made synchronously or not. The default behaviour is asynchronous.
-   *  If you want to make requests synchronous, make "sync" evaluate to true.
-   *  > let conn = new Strophe.Connection("/http-bind/", {sync: true});
-   *
-   *  You can also toggle this on an already established connection.
-   *  > conn.options.sync = true;
-   *
-   *  The *customHeaders* option can be used to provide custom HTTP headers to be
-   *  included in the XMLHttpRequests made.
-   *
-   *  The *keepalive* option can be used to instruct Strophe to maintain the
-   *  current BOSH session across interruptions such as webpage reloads.
-   *
-   *  It will do this by caching the sessions tokens in sessionStorage, and when
-   *  "restore" is called it will check whether there are cached tokens with
-   *  which it can resume an existing session.
-   *
-   *  The *withCredentials* option should receive a Boolean value and is used to
-   *  indicate wether cookies should be included in ajax requests (by default
-   *  they're not).
-   *  Set this value to true if you are connecting to a BOSH service
-   *  and for some reason need to send cookies to it.
-   *  In order for this to work cross-domain, the server must also enable
-   *  credentials by setting the Access-Control-Allow-Credentials response header
-   *  to "true". For most usecases however this setting should be false (which
-   *  is the default).
-   *  Additionally, when using Access-Control-Allow-Credentials, the
-   *  Access-Control-Allow-Origin header can't be set to the wildcard "*", but
-   *  instead must be restricted to actual domains.
-   *
-   *  The *contentType* option can be set to change the default Content-Type
-   *  of "text/xml; charset=utf-8", which can be useful to reduce the amount of
-   *  CORS preflight requests that are sent to the server.
+   *  > const conn = new Connection("/http-bind/");
    *
    *  Parameters:
    *
@@ -451,18 +389,16 @@ export class Connection {
    *  Returns:
    *    @returns A new Strophe.Connection object.
    */
-  constructor(service: string, options?: ConnectionOptions) {
-    // The service URL
-    this.service = service;
-    // Configuration options
-    this.options = options || {};
+  constructor(public service: string, readonly options?: ConnectionOptions) {
+    const proto = this.options.protocol || '';
+    if (this.options.worker) {
+      this.protocolManager = new WorkerWebsocket(this, this.stanzasInSubject);
+    } else if (this.service.indexOf('ws:') === 0 || this.service.indexOf('wss:') === 0 || proto.indexOf('ws') === 0) {
+      this.protocolManager = new StropheWebsocket(this, this.stanzasInSubject);
+    } else {
+      this.protocolManager = new Bosh(this);
+    }
 
-    this.setProtocol();
-
-    /* The connected JID. */
-    this.jid = '';
-    /* the JIDs domain */
-    this.domain = null;
     /* stream:features */
     this.features = null;
 
@@ -538,14 +474,14 @@ export class Connection {
     }
   }
 
-  /** Function: reset
+  /**
    *  Reset the connection.
    *
    *  This function should be called after a connection is disconnected
    *  before that connection is reused.
    */
   reset(): void {
-    this.protocol._reset();
+    this.protocolManager.reset();
 
     // SASL
     this.do_session = false;
@@ -569,7 +505,7 @@ export class Connection {
     this.uniqueId = 0;
   }
 
-  /** Function: pause
+  /**
    *  Pause the request manager.
    *
    *  This will prevent Strophe from sending any more requests to the
@@ -582,7 +518,7 @@ export class Connection {
     this.paused = true;
   }
 
-  /** Function: resume
+  /**
    *  Resume the request manager.
    *
    *  This resumes after pause() has been called.
@@ -615,16 +551,16 @@ export class Connection {
    *    @returns A unique string to be used for the id attribute.
    */
   getUniqueId(suffix?: string | number): string {
-    const uuid = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+    const uuid: string = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
       const r = (Math.random() * 16) | 0,
         v = c === 'x' ? r : (r & 0x3) | 0x8;
       return v.toString(16);
     });
-    if (typeof suffix === 'string' || typeof suffix === 'number') {
+    if (suffix != null) {
       return uuid + ':' + suffix;
-    } else {
-      return uuid + '';
     }
+
+    return uuid;
   }
 
   /** Function: addProtocolErrorHandler
@@ -742,10 +678,10 @@ export class Connection {
 
     this._changeConnectStatus(Status.CONNECTING, null);
 
-    this.protocol._connect(wait, hold, route);
+    this.protocolManager._connect(wait, hold, route);
   }
 
-  /** Function: attach
+  /**
    *  Attach to an already created and authenticated BOSH session.
    *
    *  This function is provided to allow Strophe to attach to BOSH
@@ -780,9 +716,9 @@ export class Connection {
     wind?: number
   ): void {
     // @ts-ignore
-    if (this.protocol._attach) {
+    if (this.protocolManager._attach) {
       // @ts-ignore
-      return this.protocol._attach(jid, sid, rid, callback, wait, hold, wind);
+      return this.protocolManager._attach(jid, sid, rid, callback, wait, hold, wind);
     } else {
       const stropheError = new Error('The "attach" method is not available for your connection protocol');
       stropheError.name = 'StropheSessionError';
@@ -805,7 +741,7 @@ export class Connection {
    * Parameters:
    *
    *    @param jid - The user’s JID.  This may be a bare JID or a full JID.
-   *    @param callback - The connect callback function.
+   *    @param callback - connect callback function.
    *    @param wait - The optional HTTPBIND wait value.
    *      This is the time the server will wait before returning an empty result for a request.
    *      The default setting of 60 seconds is recommended.
@@ -824,7 +760,7 @@ export class Connection {
   ): void {
     if (this._sessionCachingSupported()) {
       // @ts-ignore
-      this.protocol._restore(jid, callback, wait, hold, wind);
+      this.protocolManager._restore(jid, callback, wait, hold, wind);
     } else {
       const stropheError = new Error('The "restore" method can only be used with a BOSH connection.');
       stropheError.name = 'StropheSessionError';
@@ -832,12 +768,12 @@ export class Connection {
     }
   }
 
-  /** PrivateFunction: _sessionCachingSupported
+  /**
    * Checks whether sessionStorage and JSON are supported and whether we're
    * using BOSH.
    */
   _sessionCachingSupported() {
-    if (this.protocol instanceof Bosh) {
+    if (this.protocolManager instanceof Bosh) {
       if (!JSON) {
         return false;
       }
@@ -898,40 +834,6 @@ export class Connection {
     return;
   }
 
-  /** Function: rawInput
-   *  User overrideable function that receives raw data coming into the
-   *  connection.
-   *
-   *  The default function does nothing.  User code can override this with
-   *  > Connection.rawInput = function (data) {
-   *  >   (user code)
-   *  > };
-   *
-   *  Parameters:
-   *
-   *    @param _data - The data received by the connection.
-   */
-  rawInput(_data: string): void {
-    return;
-  }
-
-  /** Function: rawOutput
-   *  User overrideable function that receives raw data sent to the
-   *  connection.
-   *
-   *  The default function does nothing.  User code can override this with
-   *  > Connection.rawOutput = function (data) {
-   *  >   (user code)
-   *  > };
-   *
-   *  Parameters:
-   *
-   *    @param _data - The data sent by the connection.
-   */
-  rawOutput(_data: string): void {
-    return;
-  }
-
   /** Function: nextValidRid
    *  User overrideable function that receives the new valid rid.
    *
@@ -948,7 +850,7 @@ export class Connection {
     return;
   }
 
-  /** Function: send
+  /**
    *  Send a stanza.
    *
    *  This function is called to push data onto the send queue to
@@ -960,7 +862,7 @@ export class Connection {
    *  @param elem - The stanza to send.
    */
   send(elem: Element | Element[] | Builder): void {
-    if (elem == null) {
+    if (!elem) {
       return;
     }
     if (Array.isArray(elem)) {
@@ -972,7 +874,7 @@ export class Connection {
     } else {
       this._queueData(elem);
     }
-    this.protocol._send();
+    this.protocolManager._send();
   }
 
   /** Function: flush
@@ -997,7 +899,7 @@ export class Connection {
    *
    *  Parameters:
    *
-   *    @param elem - The stanza to send.
+   *    @param el - The stanza to send.
    *    @param callback - The callback function for a successful request.
    *    @param errback - The callback function for a failed or timed
    *      out request.  On timeout, the stanza will be null.
@@ -1067,7 +969,7 @@ export class Connection {
    *
    *  Parameters:
    *
-   *    @param elem - T XMLElement ashe stanza to send.
+   *    @param el - T XMLElement ashe stanza to send.
    *    @param callback - The callback function for a successful request.
    *    @param errback - The callback function for a failed or timed
    *      out request.  On timeout, the stanza will be null.
@@ -1282,6 +1184,10 @@ export class Connection {
     }
   }
 
+  observeForMatch$(options: MatcherConfig): Observable<Element> {
+    return this.stanzasIn$.pipe(filter((elem) => new Matcher(options).isMatch(elem)));
+  }
+
   /** Function: registerSASLMechanisms
    *
    * Register the SASL mechanisms which will be supported by this instance of
@@ -1361,10 +1267,10 @@ export class Connection {
       // setup timeout handler
       this.disconnectTimeout = this._addSysTimedHandler(this.disconnection_timeout, this._onDisconnectTimeout.bind(this));
       // @ts-ignore
-      this.protocol._disconnect(pres);
+      this.protocolManager._disconnect(pres);
     } else {
       warn('Disconnect was called before Strophe connected to the server');
-      this.protocol._abortAllRequests();
+      this.protocolManager._abortAllRequests();
       this._doDisconnect();
     }
   }
@@ -1386,7 +1292,7 @@ export class Connection {
     }
 
     debug('_doDisconnect was called');
-    this.protocol._doDisconnect();
+    this.protocolManager._doDisconnect();
 
     this.authenticated = false;
     this.disconnecting = false;
@@ -1453,7 +1359,7 @@ export class Connection {
     }
   }
 
-  /** PrivateFunction: _attemptSASLAuth
+  /**
    *
    *  Iterate through an array of SASL mechanisms and attempt authentication
    *  with the highest priority (enabled) mechanism.
@@ -1495,7 +1401,7 @@ export class Connection {
     return mechanism_found;
   }
 
-  /** PrivateFunction: _sasl_challenge_cb
+  /**
    *  _Private_ handler for the SASL challenge
    *
    */
@@ -1510,7 +1416,7 @@ export class Connection {
     return true;
   }
 
-  /** PrivateFunction: _attemptLegacyAuth
+  /**
    *
    *  Attempt legacy (i.e. non-SASL) authentication.
    */
@@ -1538,7 +1444,7 @@ export class Connection {
     }
   }
 
-  /** PrivateFunction: _onLegacyAuthIQResult
+  /**
    *  _Private_ handler for legacy authentication.
    *
    *  This handler is called in response to the initial <iq type='get'/>
@@ -1575,7 +1481,7 @@ export class Connection {
     return false;
   }
 
-  /** PrivateFunction: _sasl_success_cb
+  /**
    *  _Private_ handler for succesful SASL authentication.
    *
    *  Parameters:
@@ -1638,17 +1544,17 @@ export class Connection {
     return false;
   }
 
-  /** PrivateFunction: _sendRestart
+  /**
    *  Send an xmpp:restart stanza.
    */
   _sendRestart() {
     this.data.push($build('restart').tree());
-    this.protocol._sendRestart();
+    this.protocolManager._sendRestart();
     // @ts-ignore
     this.idleTimeout = setTimeout(() => this._onIdle(), 100);
   }
 
-  /** PrivateFunction: _onStreamFeaturesAfterSASL
+  /**
    *  Parameters:
    *    (XMLElement) elem - The matching stanza.
    *
@@ -1706,7 +1612,7 @@ export class Connection {
     }
   }
 
-  /** PrivateFunction: _onResourceBindIQ
+  /**
    *  _Private_ handler for binding result and session start.
    *
    *  Parameters:
@@ -1747,7 +1653,7 @@ export class Connection {
     }
   }
 
-  /** PrivateFunction: _establishSession
+  /**
    *  Send IQ request to establish a session with the XMPP server.
    *
    *  See https://xmpp.org/rfcs/rfc3921.html#session
@@ -1766,7 +1672,7 @@ export class Connection {
     this.send($iq({ type: 'set', id: '_session_auth_2' }).c('session', { xmlns: NS.SESSION }).tree());
   }
 
-  /** PrivateFunction: _onSessionResultIQ
+  /**
    *  _Private_ handler for the server's IQ response to a client's session
    *  request.
    *
@@ -1797,7 +1703,7 @@ export class Connection {
     return false;
   }
 
-  /** PrivateFunction: _sasl_failure_cb
+  /**
    *  _Private_ handler for SASL authentication failure.
    *
    *  Parameters:
@@ -1824,7 +1730,7 @@ export class Connection {
     return false;
   }
 
-  /** PrivateFunction: _auth2_cb
+  /**
    *  _Private_ handler to finish legacy authentication.
    *
    *  This handler is called when the result from the jabber:iq:auth
@@ -1847,7 +1753,7 @@ export class Connection {
     return false;
   }
 
-  /** PrivateFunction: _addSysTimedHandler
+  /**
    *  _Private_ function to add a system level timed handler.
    *
    *  This function is used to add a Strophe.TimedHandler for the
@@ -1865,21 +1771,7 @@ export class Connection {
     return thand;
   }
 
-  /** Function: setProtocol
-   *  Select protocol based on this.options or this.service
-   */
-  setProtocol(): void {
-    const proto = this.options.protocol || '';
-    if (this.options.worker) {
-      this.protocol = new WorkerWebsocket(this);
-    } else if (this.service.indexOf('ws:') === 0 || this.service.indexOf('wss:') === 0 || proto.indexOf('ws') === 0) {
-      this.protocol = new StropheWebsocket(this);
-    } else {
-      this.protocol = new Bosh(this);
-    }
-  }
-
-  /** PrivateFunction: _onDisconnectTimeout
+  /**
    *  _Private_ timeout handler for handling non-graceful disconnection.
    *
    *  If the graceful disconnect process does not complete within the
@@ -1891,13 +1783,13 @@ export class Connection {
   _onDisconnectTimeout(): false {
     debug('_onDisconnectTimeout was called');
     this._changeConnectStatus(Status.CONNTIMEOUT, null);
-    this.protocol._onDisconnectTimeout();
+    this.protocolManager._onDisconnectTimeout();
     // actually disconnect
     this._doDisconnect();
     return false;
   }
 
-  /** PrivateFunction: _changeConnectStatus
+  /**
    *  _Private_ helper function that makes sure plugins and the user's
    *  callback are notified of connection status changes.
    *
@@ -1933,8 +1825,8 @@ export class Connection {
     }
   }
 
-  /** PrivateFunction: _dataRecv
-   *  _Private_ handler to processes incoming data from the the connection.
+  /**
+   *  _Private_ handler to processes incoming data from the connection.
    *
    *  Except for _connect_cb handling the initial connection request,
    *  this function handles the incoming data for all requests.  This
@@ -1944,29 +1836,19 @@ export class Connection {
    *  Parameters:
    *
    *    @param req - The request that has data ready.
-   *    @param raw - The stanza a raw string (optiona).
    */
-  _dataRecv(req: Element, raw?: string): void {
-    // @ts-ignore
-    const elem = this.protocol._reqToData(req);
+  _dataRecv(req: Element): void {
+    const elem = this.protocolManager._reqToData(req as unknown as any);
     if (elem === null) {
       return;
     }
 
-    if (this.xmlInput !== Connection.prototype.xmlInput) {
-      // @ts-ignore
-      if (elem.nodeName === this.protocol.strip && elem.childNodes.length) {
-        this.xmlInput(elem.childNodes[0]);
-      } else {
-        this.xmlInput(elem);
-      }
-    }
-    if (this.rawInput !== Connection.prototype.rawInput) {
-      if (raw) {
-        this.rawInput(raw);
-      } else {
-        this.rawInput(serialize(elem));
-      }
+    if (elem.nodeName === this.protocolManager.strip && Array.isArray(elem.childNodes)) {
+      this.xmlInput(elem.childNodes[0]);
+      this.stanzasInSubject.next(elem.childNodes[0] as Element);
+    } else {
+      this.xmlInput(elem);
+      this.stanzasInSubject.next(elem);
     }
 
     // remove handlers scheduled for deletion
@@ -1984,7 +1866,7 @@ export class Connection {
     }
 
     // handle graceful disconnect
-    if (this.disconnecting && this.protocol._emptyQueue()) {
+    if (this.disconnecting && this.protocolManager._emptyQueue()) {
       this._doDisconnect();
       return;
     }
@@ -2039,7 +1921,7 @@ export class Connection {
     });
   }
 
-  /** PrivateFunction: _addSysHandler
+  /**
    *  _Private_ function to add a system level stanza handler.
    *
    *  This function is used to add a Handler for the
@@ -2101,7 +1983,7 @@ export class Connection {
     }
     this.timedHandlers = newList;
     clearTimeout(this.idleTimeout);
-    this.protocol._onIdle();
+    this.protocolManager._onIdle();
 
     // reactivate the timer only if connected
     if (this.connected) {
@@ -2110,7 +1992,7 @@ export class Connection {
     }
   }
 
-  /** PrivateFunction: _connect_cb
+  /**
    *  _Private_ handler for initial connection request.
    *
    *  This handler is used to process the initial connection request
@@ -2127,14 +2009,13 @@ export class Connection {
    *      Useful for plugins with their own xmpp connect callback (when they
    *      want to do something special).
    */
-  _connect_cb(req: Element, _callback: () => void, raw?: string) {
+  _connect_cb(req: Element, _callback: () => void) {
     debug('_connect_cb was called');
     this.connected = true;
 
     let bodyWrap: Element;
     try {
-      // @ts-ignore
-      bodyWrap = this.protocol._reqToData(req);
+      bodyWrap = this.protocolManager._reqToData(req as unknown as any);
     } catch (e) {
       if (e.name !== ErrorCondition.BAD_FORMAT) {
         throw e;
@@ -2146,23 +2027,13 @@ export class Connection {
       return;
     }
 
-    if (this.xmlInput !== Connection.prototype.xmlInput) {
-      // @ts-ignore
-      if (bodyWrap.nodeName === this.protocol.strip && bodyWrap.childNodes.length) {
-        this.xmlInput(bodyWrap.childNodes[0] as Element);
-      } else {
-        this.xmlInput(bodyWrap);
-      }
-    }
-    if (this.rawInput !== Connection.prototype.rawInput) {
-      if (raw) {
-        this.rawInput(raw);
-      } else {
-        this.rawInput(serialize(bodyWrap));
-      }
+    if (bodyWrap.nodeName === this.protocolManager.strip && bodyWrap.childNodes.length) {
+      this.xmlInput(bodyWrap.childNodes[0] as Element);
+    } else {
+      this.xmlInput(bodyWrap);
     }
 
-    const conncheck = this.protocol._connect_cb(bodyWrap);
+    const conncheck = this.protocolManager._connect_cb(bodyWrap);
     if (conncheck === Status.CONNFAIL) {
       return;
     }
@@ -2175,7 +2046,7 @@ export class Connection {
       hasFeatures = bodyWrap.getElementsByTagName('stream:features').length > 0 || bodyWrap.getElementsByTagName('features').length > 0;
     }
     if (!hasFeatures) {
-      this.protocol._no_auth_received(_callback);
+      this.protocolManager._no_auth_received(_callback);
       return;
     }
 
@@ -2183,16 +2054,14 @@ export class Connection {
       .map((m) => this.mechanisms[m.textContent])
       .filter((m) => m);
 
-    if (matched.length === 0) {
-      if (bodyWrap.getElementsByTagName('auth').length === 0) {
-        // There are no matching SASL mechanisms and also no legacy
-        // auth available.
-        this.protocol._no_auth_received(_callback);
-        return;
-      }
+    if (matched.length !== 0 && this.do_authentication !== false) {
+      this.authenticate(matched).then(_callback);
     }
-    if (this.do_authentication !== false) {
-      this.authenticate(matched);
+
+    if (bodyWrap.getElementsByTagName('auth').length === 0) {
+      // There are no matching SASL mechanisms and also no legacy
+      // auth available.
+      this.protocolManager._no_auth_received(_callback);
     }
   }
 

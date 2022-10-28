@@ -6,6 +6,7 @@ import { Status } from './status';
 import { $build } from './builder-helper';
 import { NS } from './namespace';
 import { serialize } from './xml';
+import { Subject } from 'rxjs';
 
 const lmap = {
   debug: LogLevel.DEBUG,
@@ -33,14 +34,15 @@ export class WorkerWebsocket extends StropheWebsocket {
    *
    *  Parameters:
    *
-   *    @param connection - The Strophe.Connection
+   *   @param connection - The Connection owning this protocol manager
+   *   @param stanzasInSubject - will be called for incoming messages
    *
    *  Returns:
    *   @returns A new Strophe.WorkerWebsocket object.
    */
-  constructor(connection: Connection) {
-    super(connection);
-    this.worker = new SharedWorker(this._conn.options.worker, 'Strophe XMPP Connection');
+  constructor(connection: Connection, stanzasInSubject: Subject<Element>) {
+    super(connection, stanzasInSubject);
+    this.worker = new SharedWorker(this.connection.options.worker, 'Strophe XMPP Connection');
     this.worker.onerror = (e) => error(`Shared Worker Error: ${e}`);
   }
 
@@ -48,54 +50,53 @@ export class WorkerWebsocket extends StropheWebsocket {
     this._messageHandler = (m) => this._onInitialMessage(m);
     this.worker.port.start();
     this.worker.port.onmessage = (ev) => this._onWorkerMessage(ev);
-    this.worker.port.postMessage(['_connect', this._conn.service, this._conn.jid]);
+    this.worker.port.postMessage(['_connect', this.connection.service, this.connection.jid]);
   }
 
   _attach(callback: () => void) {
     this._messageHandler = (m) => this._onMessage(m);
-    this._conn.connect_callback = callback;
+    this.connection.connect_callback = callback;
     this.worker.port.start();
     this.worker.port.onmessage = (ev) => this._onWorkerMessage(ev);
-    this.worker.port.postMessage(['_attach', this._conn.service]);
+    this.worker.port.postMessage(['_attach', this.connection.service]);
   }
 
   _attachCallback(status: Status, jid: string) {
     if (status === Status.ATTACHED) {
-      this._conn.jid = jid;
-      this._conn.authenticated = true;
-      this._conn.connected = true;
-      this._conn.restored = true;
-      this._conn._changeConnectStatus(Status.ATTACHED);
+      this.connection.jid = jid;
+      this.connection.authenticated = true;
+      this.connection.connected = true;
+      this.connection.restored = true;
+      this.connection._changeConnectStatus(Status.ATTACHED);
     } else if (status === Status.ATTACHFAIL) {
-      this._conn.authenticated = false;
-      this._conn.connected = false;
-      this._conn.restored = false;
-      this._conn._changeConnectStatus(Status.ATTACHFAIL);
+      this.connection.authenticated = false;
+      this.connection.connected = false;
+      this.connection.restored = false;
+      this.connection._changeConnectStatus(Status.ATTACHFAIL);
     }
   }
 
   _disconnect(pres: Element) {
-    pres && this._conn.send(pres);
+    pres && this.connection.send(pres);
     const close = $build('close', { xmlns: NS.FRAMING });
-    this._conn.xmlOutput(close.tree());
+    this.connection.xmlOutput(close.tree());
     const closeString = serialize(close);
-    this._conn.rawOutput(closeString);
     this.worker.port.postMessage(['send', closeString]);
-    this._conn._doDisconnect();
+    this.connection._doDisconnect();
   }
 
   _onClose(e: CloseEvent) {
-    if (this._conn.connected && !this._conn.disconnecting) {
+    if (this.connection.connected && !this.connection.disconnecting) {
       error('Websocket closed unexpectedly');
-      this._conn._doDisconnect();
-    } else if (e && e.code === 1006 && !this._conn.connected) {
+      this.connection._doDisconnect();
+    } else if (e && e.code === 1006 && !this.connection.connected) {
       // in case the onError callback was not called (Safari 10 does not
       // call onerror when the initial connection fails) we need to
       // dispatch a CONNFAIL status update to be consistent with the
       // behavior on other browsers.
       error('Websocket closed unexcectedly');
-      this._conn._changeConnectStatus(Status.CONNFAIL, 'The WebSocket connection could not be established or was disconnected.');
-      this._conn._doDisconnect();
+      this.connection._changeConnectStatus(Status.CONNFAIL, 'The WebSocket connection could not be established or was disconnected.');
+      this.connection._doDisconnect();
     } else {
       debug('Websocket closed');
     }

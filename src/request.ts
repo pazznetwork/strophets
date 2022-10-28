@@ -12,7 +12,7 @@ import { ErrorCondition } from './error';
  */
 export class Request {
   readonly id: number;
-  private xmlData: Element;
+  xmlData: Element;
   private data: string;
   private origFunc: (req: Request) => void;
   private func: (req: Request) => void;

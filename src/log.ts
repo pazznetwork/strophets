@@ -26,9 +26,6 @@ export enum LogLevel {
  *  >   (user code here)
  *  > };
  *
- *  Please note that data sent and received over the wire is logged
- *  via Strophe.Connection.rawInput() and Strophe.Connection.rawOutput().
- *
  *  The different levels and their meanings are
  *
  *    DEBUG - Messages useful for debugging purposes.

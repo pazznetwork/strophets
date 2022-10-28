@@ -5,6 +5,9 @@ import { Status } from './status';
 import { debug, error, warn } from './log';
 import { serialize } from './xml';
 import { ErrorCondition } from './error';
+import { ProtocolManager } from './protocol-manager';
+import { Request } from './request';
+import { Subject } from 'rxjs';
 
 /**
  /**
@@ -13,9 +16,9 @@ import { ErrorCondition } from './error';
  *  The Strophe.WebSocket class is used internally by Strophe.Connection
  *  to encapsulate WebSocket sessions. It is not meant to be used from user's code.
  */
-export class StropheWebsocket {
-  protected readonly _conn: Connection;
-  private strip: string;
+export class StropheWebsocket implements ProtocolManager {
+  readonly connection: Connection;
+  strip: string;
 
   private _socket: WebSocket;
   protected get socket(): WebSocket {
@@ -31,13 +34,15 @@ export class StropheWebsocket {
    *  Currently only sets the connection Object.
    *
    *  Parameters:
-   *    (Strophe.Connection) connection - The Strophe.Connection that will use WebSockets.
+   *
+   *   @param connection - The Connection owning this protocol manager
+   *   @param stanzasInSubject - will be called for incoming messages
    *
    *  Returns:
    *    A new Strophe.WebSocket object.
    */
-  constructor(connection: Connection) {
-    this._conn = connection;
+  constructor(connection: Connection, private readonly stanzasInSubject: Subject<Element>) {
+    this.connection = connection;
     this.strip = 'wrapper';
 
     const service = connection.service;
@@ -70,7 +75,7 @@ export class StropheWebsocket {
   _buildStream() {
     return $build('open', {
       xmlns: NS.FRAMING,
-      to: this._conn.domain,
+      to: this.connection.domain,
       version: '1.0'
     });
   }
@@ -125,8 +130,8 @@ export class StropheWebsocket {
     error(errorString);
 
     // close the connection on stream_error
-    this._conn._changeConnectStatus(status, condition);
-    this._conn._doDisconnect();
+    this.connection._changeConnectStatus(status, condition);
+    this.connection._doDisconnect();
     return true;
   }
 
@@ -136,7 +141,7 @@ export class StropheWebsocket {
    *  This function is called by the reset function of the Strophe Connection.
    *  Is not needed by WebSockets.
    */
-  _reset() {
+  reset() {
     return;
   }
 
@@ -149,7 +154,7 @@ export class StropheWebsocket {
   _connect() {
     // Ensure that there is no open WebSocket from a previous Connection.
     this._closeSocket();
-    this.socket = new WebSocket(this._conn.service, 'xmpp');
+    this.socket = new WebSocket(this.connection.service, 'xmpp');
     this.socket.onopen = () => this._onOpen();
     this.socket.onerror = (e) => this._onError(e);
     this.socket.onclose = (e) => this._onClose(e);
@@ -200,8 +205,8 @@ export class StropheWebsocket {
     }
 
     if (errorMessage) {
-      this._conn._changeConnectStatus(Status.CONNFAIL, errorMessage);
-      this._conn._doDisconnect();
+      this.connection._changeConnectStatus(Status.CONNFAIL, errorMessage);
+      this.connection._doDisconnect();
       return false;
     }
     return true;
@@ -222,8 +227,8 @@ export class StropheWebsocket {
       }
 
       const streamStart = new DOMParser().parseFromString(data, 'text/xml').documentElement;
-      this._conn.xmlInput(streamStart);
-      this._conn.rawInput(message.data);
+      this.connection.xmlInput(streamStart);
+      this.stanzasInSubject.next(streamStart);
 
       //_handleStreamSteart will check for XML errors and disconnect on error
       if (this._handleStreamStart(streamStart)) {
@@ -235,28 +240,28 @@ export class StropheWebsocket {
       // Parse the raw string to an XML element
       const parsedMessage = new DOMParser().parseFromString(message.data, 'text/xml').documentElement;
       // Report this input to the raw and xml handlers
-      this._conn.xmlInput(parsedMessage);
-      this._conn.rawInput(message.data);
+      this.connection.xmlInput(parsedMessage);
+      this.stanzasInSubject.next(parsedMessage);
       const see_uri = parsedMessage.getAttribute('see-other-uri');
       if (see_uri) {
-        const service = this._conn.service;
+        const service = this.connection.service;
         // Valid scenarios: WSS->WSS, WS->ANY
-        const isSecureRedirect = (service.indexOf('wss:') >= 0 && see_uri.indexOf('wss:') >= 0) || service.indexOf('ws:') >= 0;
+        const isSecureRedirect = (service.includes('wss:') && see_uri.includes('wss:')) || service.includes('ws:');
         if (isSecureRedirect) {
-          this._conn._changeConnectStatus(Status.REDIRECT, 'Received see-other-uri, resetting connection');
-          this._conn.reset();
-          this._conn.service = see_uri;
+          this.connection._changeConnectStatus(Status.REDIRECT, 'Received see-other-uri, resetting connection');
+          this.connection.reset();
+          this.connection.service = see_uri;
           this._connect();
         }
       } else {
-        this._conn._changeConnectStatus(Status.CONNFAIL, 'Received closing stream');
-        this._conn._doDisconnect();
+        this.connection._changeConnectStatus(Status.CONNFAIL, 'Received closing stream');
+        this.connection._doDisconnect();
       }
     } else {
       this._replaceMessageHandler();
       const string = this._streamWrap(message.data);
       const elem = new DOMParser().parseFromString(string, 'text/xml').documentElement;
-      this._conn._connect_cb(elem, null, message.data);
+      this.connection._connect_cb(elem, null);
     }
   }
 
@@ -282,19 +287,18 @@ export class StropheWebsocket {
   _disconnect(pres?: Element) {
     if (this.socket && this.socket.readyState !== WebSocket.CLOSED) {
       if (pres) {
-        this._conn.send(pres);
+        this.connection.send(pres);
       }
       const close = $build('close', { xmlns: NS.FRAMING });
-      this._conn.xmlOutput(close.tree());
+      this.connection.xmlOutput(close.tree());
       const closeString = serialize(close);
-      this._conn.rawOutput(closeString);
       try {
         this.socket.send(closeString);
       } catch (e) {
         warn("Couldn't send <close /> tag.");
       }
     }
-    setTimeout(() => this._conn._doDisconnect(), 0);
+    setTimeout(() => this.connection._doDisconnect(), 0);
   }
 
   /** PrivateFunction: _doDisconnect
@@ -348,17 +352,17 @@ export class StropheWebsocket {
    * _Private_ function to handle websockets closing.
    */
   _onClose(e: CloseEvent) {
-    if (this._conn.connected && !this._conn.disconnecting) {
+    if (this.connection.connected && !this.connection.disconnecting) {
       error('Websocket closed unexpectedly');
-      this._conn._doDisconnect();
-    } else if (e && e.code === 1006 && !this._conn.connected && this.socket) {
+      this.connection._doDisconnect();
+    } else if (e && e.code === 1006 && !this.connection.connected && this.socket) {
       // in case the onError callback was not called (Safari 10 does not
       // call onerror when the initial connection fails) we need to
       // dispatch a CONNFAIL status update to be consistent with the
       // behavior on other browsers.
       error('Websocket closed unexcectedly');
-      this._conn._changeConnectStatus(Status.CONNFAIL, 'The WebSocket connection could not be established or was disconnected.');
-      this._conn._doDisconnect();
+      this.connection._changeConnectStatus(Status.CONNFAIL, 'The WebSocket connection could not be established or was disconnected.');
+      this.connection._doDisconnect();
     } else {
       debug('Websocket closed');
     }
@@ -371,11 +375,11 @@ export class StropheWebsocket {
    */
   _no_auth_received(callback: () => void) {
     error('Server did not offer a supported authentication mechanism');
-    this._conn._changeConnectStatus(Status.CONNFAIL, ErrorCondition.NO_AUTH_MECH);
+    this.connection._changeConnectStatus(Status.CONNFAIL, ErrorCondition.NO_AUTH_MECH);
     if (callback) {
-      callback.call(this._conn);
+      callback.call(this.connection);
     }
-    this._conn._doDisconnect();
+    this.connection._doDisconnect();
   }
 
   /** PrivateFunction: _onDisconnectTimeout
@@ -398,7 +402,7 @@ export class StropheWebsocket {
    */
   _onError(webSocketError: Event) {
     error('Websocket error ' + JSON.stringify(webSocketError));
-    this._conn._changeConnectStatus(Status.CONNFAIL, 'The WebSocket connection could not be established or was disconnected.');
+    this.connection._changeConnectStatus(Status.CONNFAIL, 'The WebSocket connection could not be established or was disconnected.');
     this._disconnect();
   }
 
@@ -408,18 +412,17 @@ export class StropheWebsocket {
    *  sends all queued stanzas
    */
   _onIdle() {
-    const data = this._conn.data;
-    if (data.length > 0 && !this._conn.paused) {
+    const data = this.connection.data;
+    if (data.length > 0 && !this.connection.paused) {
       for (const dataPart of data) {
         if (dataPart !== null) {
           const stanza = dataPart.tagName === 'restart' ? this._buildStream().tree() : dataPart;
           const rawStanza = serialize(stanza);
-          this._conn.xmlOutput(stanza);
-          this._conn.rawOutput(rawStanza);
+          this.connection.xmlOutput(stanza);
           this.socket.send(rawStanza);
         }
       }
-      this._conn.data = [];
+      this.connection.data = [];
     }
   }
 
@@ -451,10 +454,10 @@ export class StropheWebsocket {
     // check for closing stream
     const close = '<close xmlns="urn:ietf:params:xml:ns:xmpp-framing" />';
     if (message.data === close) {
-      this._conn.rawInput(close);
-      this._conn.xmlInput(message);
-      if (!this._conn.disconnecting) {
-        this._conn._doDisconnect();
+      this.connection.xmlInput(message.data);
+      this.stanzasInSubject.next(message.data);
+      if (!this.connection.disconnecting) {
+        this.connection._doDisconnect();
       }
       return;
     } else if (message.data.search('<open ') === 0) {
@@ -474,14 +477,14 @@ export class StropheWebsocket {
 
     const firstChild = elem.firstChild as Element;
     //handle unavailable presence stanza before disconnecting
-    if (this._conn.disconnecting && firstChild.nodeName === 'presence' && firstChild.getAttribute('type') === 'unavailable') {
-      this._conn.xmlInput(elem);
-      this._conn.rawInput(serialize(elem));
+    if (this.connection.disconnecting && firstChild.nodeName === 'presence' && firstChild.getAttribute('type') === 'unavailable') {
+      this.connection.xmlInput(elem);
+      this.stanzasInSubject.next(elem);
       // if we are already disconnecting we will ignore the unavailable stanza and
       // wait for the </stream:stream> tag before we close the connection
       return;
     }
-    this._conn._dataRecv(elem, message.data);
+    this.connection._dataRecv(elem);
   }
 
   /** PrivateFunction: _onOpen
@@ -492,10 +495,10 @@ export class StropheWebsocket {
   _onOpen() {
     debug('Websocket open');
     const start = this._buildStream();
-    this._conn.xmlOutput(start.tree());
+    this.connection.xmlOutput(start.tree());
+    this.stanzasInSubject.next(start.tree());
 
     const startString = serialize(start);
-    this._conn.rawOutput(startString);
     this.socket.send(startString);
   }
 
@@ -505,13 +508,14 @@ export class StropheWebsocket {
    * WebSockets don't use requests, so the passed argument is just returned.
    *
    *  Parameters:
-   *    (Object) stanza - The stanza.
+   *
+   *    @param request the request to extract the element from
    *
    *  Returns:
    *    The stanza that was passed.
    */
-  _reqToData(stanza: Element) {
-    return stanza;
+  _reqToData(request: Request): Element {
+    return request.xmlData;
   }
 
   /** PrivateFunction: _send
@@ -520,7 +524,7 @@ export class StropheWebsocket {
    * Just flushes the messages that are in the queue
    */
   _send() {
-    this._conn.flush();
+    this.connection.flush();
   }
 
   /** PrivateFunction: _sendRestart
@@ -528,7 +532,7 @@ export class StropheWebsocket {
    *  Send an xmpp:restart stanza.
    */
   _sendRestart() {
-    clearTimeout(this._conn.idleTimeout);
-    this._conn._onIdle.bind(this._conn)();
+    clearTimeout(this.connection.idleTimeout);
+    this.connection._onIdle.bind(this.connection)();
   }
 }
