@@ -602,9 +602,9 @@ export class Connection {
    *
    *  Parameters:
    *
-   *    @param _elem - T XMLElement ashe XML data received by the connection.
+   *    @param _elem - XML data received by the connection.
    */
-  xmlInput<TInput>(_elem: TInput): void {
+  xmlInput(_elem: Element): void {
     return;
   }
 
@@ -625,7 +625,7 @@ export class Connection {
    *
    *  Parameters:
    *
-   *    @param _elem - T XMLElement ashe XMLdata sent by the connection.
+   *    @param _elem - XML data sent by the connection.
    */
   xmlOutput(_elem: Element): void {
     return;

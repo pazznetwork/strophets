@@ -42,7 +42,7 @@
   "module": "dist/module/index.js",
   "typings": "dist/main/index.d.ts",
   "scripts": {
-    "build": "tsc -p tsconfig.json && tsc -p tsconfig.module.json",
+    "build": "rm -rf ./dist && tsc -p tsconfig.json && tsc -p tsconfig.module.json",
     "test": "karma start"
   },
   "peerDependencies": {
