@@ -25,6 +25,19 @@ export class Bosh implements ProtocolManager {
 
   private lastResponseHeaders: string;
   private readonly _requests: any[];
+
+
+  /** Variable: strip
+   *
+   *  BOSH-Connections will have all stanzas wrapped in a <body> tag when
+   *  passed to <Strophe.Connection.xmlInput> or <Strophe.Connection.xmlOutput>.
+   *  To strip this tag, User code can set <Strophe.Bosh.strip> to "body":
+   *
+   *  > Strophe.Bosh.prototype.strip = "body";
+   *
+   *  This will enable stripping of the body tag in both
+   *  <Strophe.Connection.xmlInput> and <Strophe.Connection.xmlOutput>.
+   */
   strip: string;
 
   /** PrivateConstructor: Strophe.Bosh
@@ -774,16 +787,3 @@ export class Bosh implements ProtocolManager {
     }
   }
 }
-
-/** Variable: strip
- *
- *  BOSH-Connections will have all stanzas wrapped in a <body> tag when
- *  passed to <Strophe.Connection.xmlInput> or <Strophe.Connection.xmlOutput>.
- *  To strip this tag, User code can set <Strophe.Bosh.strip> to "body":
- *
- *  > Strophe.Bosh.prototype.strip = "body";
- *
- *  This will enable stripping of the body tag in both
- *  <Strophe.Connection.xmlInput> and <Strophe.Connection.xmlOutput>.
- */
-Bosh.prototype.strip = 'false';
