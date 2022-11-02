@@ -7,12 +7,12 @@ import { debug, error, warn } from './log';
 import { Status } from './status';
 import { SECONDARY_TIMEOUT, TIMEOUT } from './timeout';
 import { ProtocolManager } from './protocol-manager';
+import { Subject, takeUntil } from 'rxjs';
 
 /**
  *  The Bosh class is used internally by the Connection class to encapsulate BOSH sessions.
  */
 export class Bosh implements ProtocolManager {
-  readonly connection: Connection;
   rid = Math.floor(Math.random() * 4294967295);
   private sid: string = null;
 
@@ -26,6 +26,9 @@ export class Bosh implements ProtocolManager {
   private lastResponseHeaders: string;
   private readonly _requests: any[];
 
+  private destroySubject = new Subject<void>();
+  private readonly noResumeableBOSHSessionSubject = new Subject<void>();
+  noResumeableBOSHSession$ = this.noResumeableBOSHSessionSubject.asObservable();
 
   /** Variable: strip
    *
@@ -40,18 +43,19 @@ export class Bosh implements ProtocolManager {
    */
   strip: string;
 
+  jid: string;
+
   /** PrivateConstructor: Strophe.Bosh
    *  Create and initialize a Strophe.Bosh object.
    *
    *  Parameters:
    *
    *    @param connection connection - The Strophe.Connection that will use BOSH.
-   *
-   *  Returns:
-   *    @returns A new Strophe.Bosh object.
+   *    @param prebindUrl
    */
-  constructor(connection: Connection) {
-    this.connection = connection;
+  constructor(readonly connection: Connection, private readonly prebindUrl?: string) {
+    this.connection.userJid$.pipe(takeUntil(this.destroySubject)).subscribe((newJid) => (this.jid = newJid));
+
     /* request id for body tags */
     this.rid = Math.floor(Math.random() * 4294967295);
     /* The current session ID. */
@@ -119,7 +123,7 @@ export class Bosh implements ProtocolManager {
     if (this.sid !== null) {
       bodyWrap.attrs({ sid: this.sid });
     }
-    if (this.connection.options.keepalive && this.connection._sessionCachingSupported()) {
+    if (this.connection.options.keepalive && this.connection.isSessionCachingSupported()) {
       this._cacheSession();
     }
     return bodyWrap;
@@ -134,7 +138,7 @@ export class Bosh implements ProtocolManager {
     this.rid = Math.floor(Math.random() * 4294967295);
     this.sid = null;
     this.errors = 0;
-    if (this.connection._sessionCachingSupported()) {
+    if (this.connection.isSessionCachingSupported()) {
       window.sessionStorage.removeItem('strophe-bosh-session');
     }
 
@@ -154,7 +158,7 @@ export class Bosh implements ProtocolManager {
    *    (String) sid - The SID of the BOSH session.
    *    (String) rid - The current RID of the BOSH session.  This RID
    *      will be used by the next request.
-   *    (Function) callback The connect callback function.
+   *    (Function) callback The connect-callback function.
    *    (Integer) wait - The optional HTTPBIND wait value.  This is the
    *      time the server will wait before returning an empty result for
    *      a request.  The default setting of 60 seconds is recommended.
@@ -165,7 +169,15 @@ export class Bosh implements ProtocolManager {
    *    (Integer) wind - The optional HTTBIND window value.  This is the
    *      allowed range of request ids that are valid.  The default is 5.
    */
-  _attach(jid: string, sid: string, rid: number, callback: () => void, wait: number, hold: number, wind: number) {
+  _attach(
+    jid: string,
+    sid: string,
+    rid: number,
+    callback: (status: number, condition: string, elem: Element) => unknown,
+    wait: number,
+    hold: number,
+    wind: number
+  ): void {
     this.connection.jid = jid;
     this.sid = sid;
     this.rid = rid;
@@ -201,7 +213,13 @@ export class Bosh implements ProtocolManager {
    *    (Integer) wind - The optional HTTBIND window value.  This is the
    *      allowed range of request ids that are valid.  The default is 5.
    */
-  _restore(jid: string, callback: () => void, wait?: number, hold?: number, wind?: number) {
+  _restore(
+    jid: string,
+    callback: (status: number, condition: string, elem: Element) => unknown,
+    wait?: number,
+    hold?: number,
+    wind?: number
+  ): void {
     const session = JSON.parse(window.sessionStorage.getItem('strophe-bosh-session'));
     if (
       typeof session !== 'undefined' &&
@@ -318,7 +336,7 @@ export class Bosh implements ProtocolManager {
   _doDisconnect() {
     this.sid = null;
     this.rid = Math.floor(Math.random() * 4294967295);
-    if (this.connection._sessionCachingSupported()) {
+    if (this.connection.isSessionCachingSupported()) {
       window.sessionStorage.removeItem('strophe-bosh-session');
     }
 
@@ -785,5 +803,57 @@ export class Bosh implements ProtocolManager {
     if (this._requests.length > 1 && Math.abs(this._requests[0].rid - this._requests[1].rid) < this.window) {
       this._processRequest(1);
     }
+  }
+
+  restoreBOSHSession(): boolean {
+    const jid = this.initBOSHSession();
+    try {
+      this._restore(jid, async (status, condition, _elem) => this.connection.onConnectStatusChanged(status, condition));
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  initBOSHSession(): string {
+    // new session
+    if (this.connection.jid && this.jid !== this.connection.jid) {
+      this.jid = this.connection.setUserJID(this.connection.jid);
+      return this.jid;
+    }
+    // Keepalive
+    this.jid && this.connection.setUserJID(this.jid);
+    return this.jid;
+  }
+
+  startNewPreboundBOSHSession(): void {
+    if (!this.prebindUrl) {
+      throw new Error('startNewPreboundBOSHSession: If you use prebind then you MUST supply a prebind_url');
+    }
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', this.prebindUrl, true);
+    xhr.setRequestHeader('Accept', 'application/json, text/javascript');
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 400) {
+        const data = JSON.parse(xhr.responseText);
+        const jid = this.connection.setUserJID(data.jid);
+        (this.connection as Connection).attach(jid, data.sid, data.rid, this.connection.onConnectStatusChanged.bind(this), 59);
+      } else {
+        xhr.onerror(null);
+      }
+    };
+    xhr.onerror = () => {
+      this.connection.killSessionBosh();
+      this.destroy();
+      /**
+       * Triggered when fetching prebind tokens failed
+       */
+      this.noResumeableBOSHSessionSubject.next();
+    };
+    xhr.send();
+  }
+
+  destroy(): void {
+    this.destroySubject.next();
   }
 }

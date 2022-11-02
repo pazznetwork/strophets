@@ -246,7 +246,11 @@ export class StropheWebsocket implements ProtocolManager {
       if (see_uri) {
         const service = this.connection.service;
         // Valid scenarios: WSS->WSS, WS->ANY
+        const isSecureRedirectOld = (service.indexOf('wss:') >= 0 && see_uri.indexOf('wss:') >= 0) || service.indexOf('ws:') >= 0;
         const isSecureRedirect = (service.includes('wss:') && see_uri.includes('wss:')) || service.includes('ws:');
+        if (isSecureRedirectOld !== isSecureRedirect) {
+          throw new Error('BAD REFACTOR!!!!');
+        }
         if (isSecureRedirect) {
           this.connection._changeConnectStatus(Status.REDIRECT, 'Received see-other-uri, resetting connection');
           this.connection.reset();

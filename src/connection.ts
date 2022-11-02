@@ -24,26 +24,12 @@ import { SASLSHA256 } from './sasl-sha256';
 import { SASLSHA384 } from './sasl-sha384';
 import { SASLSHA512 } from './sasl-sha512';
 import { ProtocolManager } from './protocol-manager';
-import { filter, Observable, share, Subject } from 'rxjs';
+import { debounceTime, filter, firstValueFrom, from as fromRxjs, Observable, share, Subject } from 'rxjs';
 import { Matcher, MatcherConfig } from './matcher';
 import { ConnectionOptions } from './connection-options';
-
-/** PrivateVariable: connectionPlugins
- *  _Private_ variable Used to store plugin names that need
- *  initialization on Connection construction.
- */
-const connectionPlugins = new Map<string, new () => { init: (conn: Connection) => void }>();
-
-/** Function: addConnectionPlugin
- *  Extends the Connection object with the given plugin.
- *
- *  Parameters:
- *    (String) name - The name of the extension.
- *    (Object) ptype - The plugin's prototype.
- */
-export function addConnectionPlugin(name: string, ptype: new () => object): void {
-  connectionPlugins[name] = ptype;
-}
+import { AuthenticationMode } from './authentication-mode';
+import { getOpenPromise } from './get-open-promise';
+import { Credentials } from './credentials';
 
 /** Class: Strophe.Connection
  *  XMPP Connection manager.
@@ -77,6 +63,13 @@ export class Connection {
    * The connected JID.
    */
   jid = '';
+
+  private readonly userJidSubject = new Subject<string>();
+  private readonly willReconnectSubject = new Subject<void>();
+
+  userJid$: Observable<string> = this.userJidSubject.pipe(share());
+  willReconnect$: Observable<void> = this.willReconnectSubject.pipe(share());
+
   /**
    * The domain of the connected JID.
    */
@@ -139,6 +132,23 @@ export class Connection {
   private stanzasOutSubject = new Subject<Element>();
   stanzasOut$ = this.stanzasOutSubject.pipe(share());
 
+  private afterResourceBindingSubject = new Subject<void>();
+  private reconnectedSubject = new Subject<void>();
+  private connectedSubject = new Subject<void>();
+  private disconnectedSubject = new Subject<void>();
+
+  private reconnecting = false;
+
+  private connectionStatus: { status: Status; message: string };
+
+  private session: Record<string, unknown>;
+  private bareJid: string;
+  private domainJid: string;
+
+  private disconnectionCause: Status;
+  private disconnectionReason: string;
+  private send_initial_presence: boolean;
+
   /**
    * protocol used for connection
    */
@@ -158,6 +168,24 @@ export class Connection {
   private scram_keys: unknown;
   private iqFallbackHandler: Handler;
   private _sasl_mechanism: SASLMechanism;
+
+  private readonly CONNECTION_STATUS = {
+    [Status.ATTACHED]: 'ATTACHED',
+    [Status.AUTHENTICATING]: 'AUTHENTICATING',
+    [Status.AUTHFAIL]: 'AUTHFAIL',
+    [Status.CONNECTED]: 'CONNECTED',
+    [Status.CONNECTING]: 'CONNECTING',
+    [Status.CONNFAIL]: 'CONNFAIL',
+    [Status.DISCONNECTED]: 'DISCONNECTED',
+    [Status.DISCONNECTING]: 'DISCONNECTING',
+    [Status.ERROR]: 'ERROR',
+    [Status.RECONNECTING]: 'RECONNECTING',
+    [Status.REDIRECT]: 'REDIRECT'
+  };
+
+  get handlePreBind(): boolean {
+    return this.authenticationMode === AuthenticationMode.PREBIND && !!this.prebindUrl;
+  }
 
   /**
    *  Create and initialize a Strophe.Connection object.
@@ -180,7 +208,16 @@ export class Connection {
    *  Returns:
    *    @returns A new Strophe.Connection object.
    */
-  constructor(public service: string, readonly options?: ConnectionOptions) {
+  private constructor(
+    public service: string,
+    readonly options?: ConnectionOptions,
+    readonly authenticationMode?: AuthenticationMode,
+    readonly prebindUrl?: string,
+    readonly boshServiceUrl?: string,
+    readonly websocketUrl?: string,
+    readonly credentialsUrl?: string,
+    readonly password?: string
+  ) {
     this.setProtocol();
     /* stream:features */
     this.features = null;
@@ -267,7 +304,7 @@ export class Connection {
     } else if (this.service.indexOf('ws:') === 0 || this.service.indexOf('wss:') === 0 || proto.indexOf('ws') === 0) {
       this.protocolManager = new StropheWebsocket(this, this.stanzasInSubject);
     } else {
-      this.protocolManager = new Bosh(this);
+      this.protocolManager = new Bosh(this, this.prebindUrl);
     }
   }
 
@@ -433,12 +470,16 @@ export class Connection {
     jid?: string,
     pass?: string,
     callback?: (status: Status, condition: string, elem: Element) => unknown,
-    wait?: number,
+    wait = 59,
     hold?: number,
     route?: string,
     authcid?: string,
     disconnection_timeout?: number
   ): void {
+    if (!this.boshServiceUrl && !this.websocketUrl) {
+      throw new Error('You must supply a value for either the bosh_service_url or websocket_url or both.');
+    }
+
     this.jid = jid;
     /** Variable: authzid
      *  Authorization identity.
@@ -555,34 +596,13 @@ export class Connection {
     hold?: number,
     wind?: number
   ): void {
-    if (this._sessionCachingSupported()) {
-      // @ts-ignore
+    if (this.protocolManager instanceof Bosh) {
       this.protocolManager._restore(jid, callback, wait, hold, wind);
     } else {
       const stropheError = new Error('The "restore" method can only be used with a BOSH connection.');
       stropheError.name = 'StropheSessionError';
       throw stropheError;
     }
-  }
-
-  /**
-   * Checks whether sessionStorage and JSON are supported and whether we're
-   * using BOSH.
-   */
-  _sessionCachingSupported() {
-    if (this.protocolManager instanceof Bosh) {
-      if (!JSON) {
-        return false;
-      }
-      try {
-        sessionStorage.setItem('_strophe_', '_strophe_');
-        sessionStorage.removeItem('_strophe_');
-      } catch (e) {
-        return false;
-      }
-      return true;
-    }
-    return false;
   }
 
   /** Function: xmlInput
@@ -1862,6 +1882,141 @@ export class Connection {
     }
   }
 
+  static async create(
+    connectionUrls: {
+      boshServiceUrl?: string;
+      websocketUrl?: string;
+      domain?: string;
+    },
+    authenticationMode = AuthenticationMode.LOGIN,
+    prebindUrl?: string,
+    credentialsUrl?: string
+  ): Promise<Connection> {
+    const options = { keepalive: true, explicitResourceBinding: true };
+
+    if (!connectionUrls.boshServiceUrl && !connectionUrls.websocketUrl && connectionUrls.domain) {
+      const { boshServiceUrl, websocketUrl } = await this.discoverConnectionMethods(connectionUrls.domain);
+      if (!connectionUrls.boshServiceUrl && authenticationMode === AuthenticationMode.PREBIND) {
+        throw new Error("authentication is set to 'prebind' but we don't have a BOSH connection");
+      }
+      return new Connection(
+        websocketUrl ?? boshServiceUrl,
+        options,
+        authenticationMode,
+        prebindUrl,
+        boshServiceUrl,
+        websocketUrl,
+        credentialsUrl
+      );
+    }
+
+    const connection_url = connectionUrls.websocketUrl ?? connectionUrls.boshServiceUrl;
+    return new Connection(
+      connection_url,
+      options,
+      authenticationMode,
+      prebindUrl,
+      connectionUrls.boshServiceUrl,
+      connectionUrls.websocketUrl,
+      credentialsUrl
+    );
+  }
+
+  /**
+   * Logs the user in.
+   *
+   * If called without any parameters, Converse will try
+   * to log the user in by calling the `prebind_url` or `credentials_url` depending
+   * on whether prebinding is used or not.
+   *
+   * @param {string} [jid]
+   * @param {string} [password]
+   * @param {boolean} [automatic=false] - An internally used flag that indicates whether
+   *  this method was called automatically once the connection has been
+   *  initialized. It's used together with the `auto_login` configuration flag
+   *  to determine whether Converse should try to log the user in if it
+   *  fails to restore a previous auth'd session.
+   *  @returns  {void}
+   */
+  async login(jid = this.jid, password?: string, automatic = false): Promise<void> {
+    if (this.options?.worker && (await this.restoreWorkerSession())) {
+      return;
+    }
+    if (jid) {
+      jid = this.setUserJID(jid);
+    }
+
+    // See whether there is a BOSH session to re-attach to
+    if (this.protocolManager instanceof Bosh && this.protocolManager.restoreBOSHSession()) {
+      return;
+    }
+    if (this.protocolManager instanceof Bosh && this.handlePreBind && !automatic) {
+      return this.protocolManager.startNewPreboundBOSHSession();
+    }
+
+    const fallBackPassword = typeof this.pass === 'string' ? this.pass : null;
+
+    password = password ?? fallBackPassword;
+    const credentials: Credentials = jid && password ? { jid, password } : null;
+    await this.attemptNonPreboundSession(credentials, automatic);
+  }
+
+  /**
+   * Adds support for XEP-0156 by querying the XMPP server for alternate
+   * connection methods. This allows users to use the websocket or BOSH
+   * connection of their own XMPP server instead of a proxy provided by the
+   * host of Converse.js.
+   *
+   * @param domain the xmpp server domain to requests the connection urls from
+   */
+  static async discoverConnectionMethods(domain: string): Promise<{ websocketUrl: string; boshServiceUrl: string }> {
+    // Use XEP-0156 to check whether this host advertises websocket or BOSH connection methods.
+    const options = {
+      mode: 'cors' as RequestMode,
+      headers: {
+        Accept: 'application/xrd+xml, text/xml'
+      }
+    };
+    const url = `https://${domain}/.well-known/host-meta`;
+    let response: globalThis.Response;
+    try {
+      response = await fetch(url, options);
+    } catch (e) {
+      log(LogLevel.ERROR, `Failed to discover alternative connection methods at ${url}`);
+      log(LogLevel.ERROR, e);
+      return null;
+    }
+    if (response.status >= 200 && response.status < 400) {
+      const text = await response.text();
+      return this.onDomainDiscovered(text);
+    }
+
+    log(LogLevel.WARN, 'Could not discover XEP-0156 connection methods');
+    return null;
+  }
+
+  static onDomainDiscovered(xmlBody: string): { websocketUrl: string; boshServiceUrl: string } {
+    const xrd = new window.DOMParser().parseFromString(xmlBody, 'text/xml').firstElementChild;
+    if (xrd.nodeName != 'XRD' || xrd.getAttribute('xmlns') != 'http://docs.oasis-open.org/ns/xri/xrd-1.0') {
+      log(LogLevel.WARN, 'Could not discover XEP-0156 connection methods');
+      return null;
+    }
+
+    const bosh_links = xrd.querySelectorAll(`Link[rel="urn:xmpp:alt-connections:xbosh"]`);
+    const ws_links = xrd.querySelectorAll(`Link[rel="urn:xmpp:alt-connections:websocket"]`);
+    const bosh_methods = Array.from(bosh_links).map((el) => el.getAttribute('href'));
+    const ws_methods = Array.from(ws_links).map((el) => el.getAttribute('href'));
+
+    if (bosh_methods.length !== 0 && ws_methods.length !== 0) {
+      log(LogLevel.WARN, 'Neither BOSH nor WebSocket connection methods have been specified with XEP-0156.');
+      return null;
+    }
+
+    const websocketUrl = ws_methods.pop();
+    const boshServiceUrl = bosh_methods.pop();
+    return { websocketUrl, boshServiceUrl };
+  }
+
   private _queueData(element: Element): void {
     if (element === null || !element.tagName || !element.childNodes) {
       const stropheError = new Error('Cannot queue non-DOMElement.');
@@ -1869,5 +2024,419 @@ export class Connection {
       throw stropheError;
     }
     this.data.push(element);
+  }
+
+  restoreWorkerSession(): PromiseWrapper<unknown> {
+    // @ts-ignore
+    this.attach(this.onConnectStatusChanged.bind(this));
+    this.worker_attach_promise = getOpenPromise();
+    return this.worker_attach_promise;
+  }
+
+  async attemptNonPreboundSession(credentials?: Credentials, automatic = false): Promise<void> {
+    if (this.authenticationMode === AuthenticationMode.LOGIN) {
+      // XXX: If EITHER ``keepalive`` or ``auto_login`` is ``true`` and
+      // ``authentication`` is set to ``login``, then Converse will try to log the user in,
+      // since we don't have a way to distinguish between whether we're
+      // restoring a previous session (``keepalive``) or whether we're
+      // automatically setting up a new session (``auto_login``).
+      // So we can't do the check (!automatic || _converse.api.settings.get("auto_login")) here.
+      if (credentials) {
+        await this.connectNonPreboundSession(credentials);
+      } else if (this.credentialsUrl) {
+        // We give credentials_url preference, because
+        // _converse.connection.pass might be an expired token.
+        await this.connectNonPreboundSession(await this.getLoginCredentials(this.credentialsUrl));
+      } else if (this.jid && (this.password || (this as unknown as any).pass)) {
+        await this.connectNonPreboundSession();
+      } else if ('credentials' in navigator) {
+        await this.connectNonPreboundSession(await this.getLoginCredentialsFromBrowser());
+      } else {
+        log(LogLevel.WARN, "attemptNonPreboundSession: Couldn't find credentials to log in with");
+      }
+    } else if ([AuthenticationMode.ANONYMOUS, AuthenticationMode.EXTERNAL].includes(this.authenticationMode) && !automatic) {
+      await this.connectNonPreboundSession();
+    }
+  }
+
+  async getLoginCredentialsFromBrowser(): Promise<{ password: any; jid: string }> {
+    try {
+      // https://github.com/microsoft/TypeScript/issues/34550
+      const creds = await navigator.credentials.get({ password: true } as unknown);
+      if (creds && creds.type == 'password' && Connection.isValidJID(creds.id)) {
+        this.setUserJID(creds.id);
+        return { jid: creds.id, password: (creds as unknown as any).password };
+      }
+    } catch (e) {
+      log(LogLevel.ERROR, e);
+    }
+    return null;
+  }
+
+  private static isValidJID(jid: string): boolean {
+    if (typeof jid === 'string') {
+      return jid.trim().split('@').length === 2 && !jid.startsWith('@') && !jid.endsWith('@');
+    }
+    return false;
+  }
+
+  fetchLoginCredentialsInterceptor = async (xhr: XMLHttpRequest): Promise<XMLHttpRequest> => xhr;
+
+  async getLoginCredentials(credentialsURL: string): Promise<Credentials> {
+    let credentials;
+    let wait = 0;
+    while (!credentials) {
+      try {
+        credentials = await this.fetchLoginCredentials(wait, credentialsURL);
+      } catch (e) {
+        log(LogLevel.ERROR, 'Could not fetch login credentials');
+        log(LogLevel.ERROR, e);
+      }
+      // If unsuccessful, we wait 2 seconds between subsequent attempts to
+      // fetch the credentials.
+      wait = 2000;
+    }
+    return credentials;
+  }
+
+  async fetchLoginCredentials(wait = 0, credentialsURL: string): Promise<Credentials> {
+    return firstValueFrom(
+      fromRxjs<Promise<Credentials>>(
+        new Promise(async (resolve, reject) => {
+          let xhr = new XMLHttpRequest();
+          xhr.open('GET', credentialsURL, true);
+          xhr.setRequestHeader('Accept', 'application/json, text/javascript');
+          xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 400) {
+              const data = JSON.parse(xhr.responseText);
+              this.setUserJID(data.jid);
+              resolve({
+                jid: data.jid,
+                password: data.password
+              });
+            } else {
+              reject(new Error(`${xhr.status}: ${xhr.responseText}`));
+            }
+          };
+          xhr.onerror = reject;
+          /**
+           * *Hook* which allows modifying the server request
+           *
+           * @event _converse#beforeFetchLoginCredentials
+           */
+          xhr = await this.fetchLoginCredentialsInterceptor(xhr);
+          xhr.send();
+        })
+      ).pipe(debounceTime(wait))
+    );
+  }
+
+  async connectNonPreboundSession(credentials?: Credentials, automaticLogin?: boolean) {
+    if ([AuthenticationMode.ANONYMOUS, AuthenticationMode.EXTERNAL].includes(this.authenticationMode)) {
+      if (!this.jid) {
+        throw new Error(
+          'Config Error: when using anonymous login ' +
+            "you need to provide the server's domain via the 'jid' option. " +
+            'Either when calling converse.initialize, or when calling ' +
+            '_converse.api.user.login.'
+        );
+      }
+      if (!this.reconnecting) {
+        this.reset();
+      }
+      await this.connect(this.jid.toLowerCase(), null);
+    } else if (this.authenticationMode === AuthenticationMode.LOGIN) {
+      const password = credentials ? credentials.password : (this as unknown as any).pass ?? this.password;
+      if (!password) {
+        if (automaticLogin) {
+          throw new Error('autoLogin: If you use auto_login and ' + "authentication='login' then you also need to provide a password.");
+        }
+        this.setDisconnectionCause(Status.AUTHFAIL, undefined, true);
+        this.disconnect('');
+        return;
+      }
+      if (!this.reconnecting) {
+        this.reset();
+      }
+      await this.connect(this.jid, password);
+    }
+  }
+
+  static generateResource() {
+    return `/ngx-chat-${Math.floor(Math.random() * 139749528).toString()}`;
+  }
+
+  /**
+   * Switch to a different transport if a service URL is available for it.
+   *
+   * When reconnecting with a new transport, we call setUserJID
+   * so that a new resource is generated, to avoid multiple
+   * server-side sessions with the same resource.
+   *
+   * We also call `_proto._doDisconnect` so that connection event handlers
+   * for the old transport are removed.
+   */
+  switchTransport(): void {
+    if (this.protocolManager instanceof StropheWebsocket && this.boshServiceUrl) {
+      this.setUserJID(this.bareJid);
+      this._doDisconnect();
+      this.protocolManager = new Bosh(this, null);
+      this.service = this.boshServiceUrl;
+    } else if (this.protocolManager instanceof Bosh && this.websocketUrl) {
+      if (this.authenticationMode === AuthenticationMode.ANONYMOUS) {
+        // When reconnecting anonymously, we need to connect with only
+        // the domain, not the full JID that we had in our previous
+        // (now failed) session.
+        this.setUserJID(this.domainJid);
+      } else {
+        this.setUserJID(this.bareJid);
+      }
+      this._doDisconnect();
+      this.protocolManager = new StropheWebsocket(this, this.stanzasInSubject);
+      this.service = this.websocketUrl;
+    }
+  }
+
+  async reconnect(): Promise<void> {
+    log(LogLevel.DEBUG, 'RECONNECTING: the connection has dropped, attempting to reconnect.');
+    this.reconnecting = true;
+
+    const isAuthenticationAnonymous = this.authenticationMode === AuthenticationMode.ANONYMOUS;
+
+    if (this.connectionStatus.status === Status.CONNFAIL) {
+      this.switchTransport();
+    } else if (this.connectionStatus.status === Status.AUTHFAIL && isAuthenticationAnonymous) {
+      // When reconnecting anonymously, we need to connect with only
+      // the domain, not the full JID that we had in our previous
+      // (now failed) session.
+      this.setUserJID(this.domainJid);
+    }
+
+    this.setConnectionStatus(Status.RECONNECTING, 'The connection has dropped, attempting to reconnect.');
+    /**
+     * Triggered when the connection has dropped, but we will attempt
+     * to reconnect again.
+     */
+    this.willReconnectSubject.next();
+
+    await this.login();
+  }
+
+  /**
+   * Called as soon as a new connection has been established, either
+   * by logging in or by attaching to an existing BOSH session.
+   *
+   * @method Connection.onConnected
+   * @param {boolean} reconnecting - Whether we reconnected from an earlier dropped session.
+   */
+  onConnected(reconnecting: boolean): void {
+    delete this.reconnecting;
+    this.flush(); // Solves problem of returned PubSub BOSH response not received by browser
+    this.setUserJID(this.jid);
+
+    /**
+     * Synchronous event triggered after we've sent an IQ to bind the
+     * user's JID resource for this session.
+     */
+    this.afterResourceBindingSubject.next();
+
+    if (reconnecting) {
+      /**
+       * After the connection has dropped and we have reconnected.
+       * Any Strophe stanza handlers will have to be registered anew.
+       */
+      this.reconnectedSubject.next();
+    } else {
+      /**
+       * Triggered after the connection has been established
+       */
+      this.connectedSubject.next();
+    }
+  }
+
+  /**
+   * Used to keep track of why we got disconnected, so that we can
+   * decide on what the next appropriate action is (in onDisconnected)
+   *
+   * @method Connection.setDisconnectionCause
+   * @param {number} cause - The status number as received from
+   * @param {string} [reason] - An optional user-facing message as to why
+   *  there was a disconnection.
+   * @param {boolean} [override] - An optional flag to replace any previous
+   *  disconnection cause and reason.
+   */
+  setDisconnectionCause(cause: number, reason?: string, override = false): void {
+    if (cause === undefined) {
+      delete this.disconnectionCause;
+      delete this.disconnectionReason;
+    } else if (this.disconnectionCause === undefined || override) {
+      this.disconnectionCause = cause;
+      this.disconnectionReason = reason;
+    }
+  }
+
+  setConnectionStatus(status: Status, message: string): void {
+    this.status = status;
+    this.connectionStatus = { status, message };
+  }
+
+  async finishDisconnection(): Promise<void> {
+    // Properly tear down the session so that it's possible to manually connect again.
+    log(LogLevel.DEBUG, 'DISCONNECTED');
+    delete this.reconnecting;
+    this.reset();
+    await this.clearSession();
+    /**
+     * Triggered after we disconnected from the XMPP server.
+     */
+    this.disconnectedSubject.next();
+  }
+
+  /**
+   * Gets called once strophe's status reaches Status.DISCONNECTED.
+   * Will either start a teardown process for converse.js or attempt
+   * to reconnect.
+   *
+   */
+  async onDisconnected(automaticLogin?: boolean): Promise<void> {
+    if (!automaticLogin) {
+      await this.finishDisconnection();
+      return;
+    }
+
+    const reason = this.disconnectionReason;
+    const authFailed = this.disconnectionCause === Status.AUTHFAIL;
+    if ((authFailed && this.credentialsUrl) || this.authenticationMode === AuthenticationMode.ANONYMOUS) {
+      // If `credentials_url` is set, we reconnect, because we might
+      // be receiving expirable tokens from the credentials_url.
+      //
+      // If `authentication` is anonymous, we reconnect because we
+      // might have tried to attach with stale BOSH session tokens
+      // or with a cached JID and password
+      await this.reconnect();
+      return;
+    }
+
+    if (authFailed) {
+      await this.finishDisconnection();
+      return;
+    }
+
+    if (this.connectionStatus.status === Status.CONNECTING) {
+      // Don't try to reconnect if we were never connected to begin
+      // with, otherwise an infinite loop can occur (e.g. when the
+      // BOSH service URL returns a 404).
+      this.setConnectionStatus(Status.CONNFAIL, 'An error occurred while connecting to the chat server.');
+      await this.finishDisconnection();
+      return;
+    }
+
+    if (
+      this.disconnectionCause === Status.DISCONNECTING ||
+      reason === ErrorCondition.NO_AUTH_MECH ||
+      reason === 'host-unknown' ||
+      reason === 'remote-connection-failed'
+    ) {
+      await this.finishDisconnection();
+      return;
+    }
+
+    await this.reconnect();
+  }
+
+  // TODO: Ensure can be replaced by strophe-connection.service then delete
+  /**
+   * Callback method called by Strophe as the Connection goes
+   * through various states while establishing or tearing down a
+   * connection.
+   *
+   * @param {number} status
+   * @param {string} message
+   */
+  async onConnectStatusChanged(status: Status, message: string): Promise<void> {
+    log(LogLevel.DEBUG, `Status changed to: ${this.CONNECTION_STATUS[status]}`);
+    if (status === Status.ATTACHFAIL) {
+      this.setConnectionStatus(status, message);
+      this.worker_attach_promise?.resolve(false);
+    } else if (status === Status.CONNECTED || status === Status.ATTACHED) {
+      if (this.worker_attach_promise?.isResolved && this.connectionStatus.status === Status.ATTACHED) {
+        // A different tab must have attached, so nothing to do for us here.
+        return;
+      }
+      this.setConnectionStatus(status, message);
+      this.worker_attach_promise?.resolve(true);
+
+      // By default, we always want to send out an initial presence stanza.
+      this.send_initial_presence = true;
+      this.setDisconnectionCause(undefined);
+      if (this.reconnecting) {
+        log(LogLevel.DEBUG, status === Status.CONNECTED ? 'Reconnected' : 'Reattached');
+        this.onConnected(true);
+      } else {
+        log(LogLevel.DEBUG, status === Status.CONNECTED ? 'Connected' : 'Attached');
+        if (this.restored) {
+          // No need to send an initial presence stanza when
+          // we're restoring an existing session.
+          this.send_initial_presence = false;
+        }
+        this.onConnected(false);
+      }
+    } else if (status === Status.DISCONNECTED) {
+      this.setDisconnectionCause(status, message);
+      await this.onDisconnected();
+    } else if (status === Status.BINDREQUIRED) {
+      this.bind();
+    } else if (status === Status.ERROR) {
+      this.setConnectionStatus(status, 'An error occurred while connecting to the chat server.');
+    } else if (status === Status.CONNECTING) {
+      this.setConnectionStatus(status, message);
+    } else if (status === Status.AUTHENTICATING) {
+      this.setConnectionStatus(status, message);
+    } else if (status === Status.AUTHFAIL) {
+      if (!message) {
+        message = 'Your XMPP address and/or password is incorrect. Please try again.';
+      }
+      this.setConnectionStatus(status, message);
+      this.setDisconnectionCause(status, message, true);
+      await this.onDisconnected();
+    } else if (status === Status.CONNFAIL) {
+      let feedback = message;
+      if (message === 'host-unknown' || message == 'remote-connection-failed') {
+        feedback = 'Sorry, we could not connect to the XMPP host with domain: ' + this.domainJid;
+      } else if (message !== undefined && message === ErrorCondition?.NO_AUTH_MECH) {
+        feedback = 'The XMPP server did not offer a supported authentication mechanism';
+      }
+      this.setConnectionStatus(status, feedback);
+      this.setDisconnectionCause(status, message);
+    } else if (status === Status.DISCONNECTING) {
+      this.setDisconnectionCause(status, message);
+    }
+  }
+
+  /**
+   * Stores the passed in JID for the current user, potentially creating a
+   * resource if the JID is bare.
+   *
+   * @emits userJidSubject
+   * @param {string} jid
+   */
+  setUserJID(jid: string): string {
+    /**
+     * Triggered whenever the user's JID has been updated
+     */
+    this.jid = jid;
+    this.userJidSubject.next(this.jid);
+    return this.jid;
+  }
+
+  private clearSession(): void {
+    delete this.domainJid;
+    delete this.bareJid;
+    delete this.session;
+    this.setProtocol();
+  }
+
+  killSessionBosh(): void {
+    this.clearSession();
   }
 }
