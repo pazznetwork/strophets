@@ -8,7 +8,7 @@ import { NS } from './namespace';
 import { forEachChild, getBareJidFromJid, getDomainFromJid, getNodeFromJid, getResourceFromJid, getText } from './xml';
 import { ErrorCondition, handleError } from './error';
 import { $build, $iq, $pres } from './builder-helper';
-import { debug, error, info, log, LogLevel, warn } from './log';
+import { debug, info, log, LogLevel, warn } from './log';
 import { Bosh } from './bosh';
 import { Request } from './request';
 import { WorkerWebsocket } from './worker-websocket';
@@ -24,12 +24,13 @@ import { SASLSHA256 } from './sasl-sha256';
 import { SASLSHA384 } from './sasl-sha384';
 import { SASLSHA512 } from './sasl-sha512';
 import { ProtocolManager } from './protocol-manager';
-import { debounceTime, filter, firstValueFrom, from as fromRxjs, Observable, share, Subject } from 'rxjs';
+import { debounceTime, filter, firstValueFrom, from as fromRxjs, Observable, share, shareReplay, startWith, Subject } from 'rxjs';
 import { Matcher, MatcherConfig } from './matcher';
 import { ConnectionOptions } from './connection-options';
 import { AuthenticationMode } from './authentication-mode';
 import { getOpenPromise } from './get-open-promise';
 import { Credentials } from './credentials';
+import { errorMessages } from './error-messages';
 
 /** Class: Strophe.Connection
  *  XMPP Connection manager.
@@ -132,6 +133,9 @@ export class Connection {
   private stanzasOutSubject = new Subject<Element>();
   stanzasOut$ = this.stanzasOutSubject.pipe(share());
 
+  protected readonly stateSubject = new Subject<Status>();
+  readonly state$ = this.stateSubject.pipe(startWith(Status.DISCONNECTED), shareReplay(1));
+
   private afterResourceBindingSubject = new Subject<void>();
   private reconnectedSubject = new Subject<void>();
   private connectedSubject = new Subject<void>();
@@ -185,6 +189,22 @@ export class Connection {
 
   get handlePreBind(): boolean {
     return this.authenticationMode === AuthenticationMode.PREBIND && !!this.prebindUrl;
+  }
+
+  /**
+   * Stores the passed in JID for the current user, potentially creating a
+   * resource if the JID is bare.
+   *
+   * @emits userJidSubject
+   * @param {string} jid
+   */
+  setUserJID(jid: string): string {
+    /**
+     * Triggered whenever the user's JID has been updated
+     */
+    this.jid = jid;
+    this.userJidSubject.next(this.jid);
+    return this.jid;
   }
 
   /**
@@ -1299,7 +1319,7 @@ export class Connection {
   }
 
   /**
-   *  _Private_ handler for succesful SASL authentication.
+   *  _Private_ handler for successful SASL authentication.
    *
    *  Parameters:
    *    (XMLElement) elem - The matching stanza.
@@ -1626,7 +1646,7 @@ export class Connection {
           try {
             plugin.statusChanged(status, condition);
           } catch (err) {
-            error(`${k} plugin caused an exception changing status: ${err}`);
+            log(LogLevel.ERROR, `${k} plugin caused an exception changing status: ${err}`);
           }
         }
       }
@@ -1637,7 +1657,7 @@ export class Connection {
         this.connect_callback(status, condition, elem);
       } catch (e) {
         handleError(e);
-        error(`User connection callback caused an exception: ${e}`);
+        log(LogLevel.ERROR, `User connection callback caused an exception: ${e}`);
       }
     }
   }
@@ -1883,15 +1903,13 @@ export class Connection {
   }
 
   static async create(
-    connectionUrls: {
-      boshServiceUrl?: string;
-      websocketUrl?: string;
-      domain?: string;
-    },
+    service: string,
+    domain: string,
     authenticationMode = AuthenticationMode.LOGIN,
     prebindUrl?: string,
     credentialsUrl?: string
   ): Promise<Connection> {
+    const connectionUrls = this.getConnectionsUrls(service, domain);
     const options = { keepalive: true, explicitResourceBinding: true };
 
     if (!connectionUrls.boshServiceUrl && !connectionUrls.websocketUrl && connectionUrls.domain) {
@@ -1920,6 +1938,16 @@ export class Connection {
       connectionUrls.websocketUrl,
       credentialsUrl
     );
+  }
+
+  static getConnectionsUrls(service: string, domain: string) {
+    const isWebsocket = /wss?:\/\//.test(service);
+
+    return {
+      domain,
+      boshServiceUrl: isWebsocket ? undefined : service,
+      websocketUrl: isWebsocket ? service : undefined
+    };
   }
 
   /**
@@ -1959,6 +1987,61 @@ export class Connection {
     password = password ?? fallBackPassword;
     const credentials: Credentials = jid && password ? { jid, password } : null;
     await this.attemptNonPreboundSession(credentials, automatic);
+  }
+
+  async loginNew(username: string, domain: string, service: string, password: string): Promise<void> {
+    const separator = '@';
+    const safeUsername = username.indexOf(separator) > -1 ? username.split(separator)[0] : username;
+    const jid = safeUsername + separator + domain;
+
+    const conn = await Connection.create(service, domain);
+    return new Promise((resolve, reject) => {
+      conn.connect(jid, password, this.createConnectionStatusHandler(safeUsername, domain, resolve, reject));
+    });
+  }
+
+  createConnectionStatusHandler(username: string, domain: string, resolve: () => void, reject: (reason?: string) => void) {
+    return (status: Status, value: string) => {
+      log(LogLevel.INFO, `status update; status=${status}, value=${JSON.stringify(value)}`);
+
+      switch (status) {
+        case Status.REDIRECT:
+        case Status.ATTACHED:
+        case Status.CONNECTING:
+        // @ts-ignore
+        case StropheStatusRegister.REGISTER:
+        // @ts-ignore
+        case StropheStatusRegister.REGISTERED:
+          break;
+        case Status.AUTHENTICATING:
+          break;
+        case Status.CONNECTED:
+          resolve();
+          break;
+        case Status.ERROR:
+        case Status.CONNFAIL:
+        case Status.AUTHFAIL:
+        case Status.CONNTIMEOUT:
+        // @ts-ignore
+        case StropheStatusRegister.CONFLICT:
+        // @ts-ignore
+        case StropheStatusRegister.REGIFAIL:
+        // @ts-ignore
+        case StropheStatusRegister.NOTACCEPTABLE:
+          reject(`${errorMessages[status]}, failed with status code: ${status}`);
+          break;
+        case Status.BINDREQUIRED:
+          this.bind();
+          break;
+        case Status.DISCONNECTING:
+        case Status.DISCONNECTED:
+          break;
+        default:
+          log(LogLevel.ERROR, `Unhandled connection status; status=${status}`);
+      }
+
+      this.stateSubject.next(status);
+    };
   }
 
   /**
@@ -2222,6 +2305,172 @@ export class Connection {
     await this.login();
   }
 
+  async logOut(): Promise<void> {
+    await new Promise((resolve) => this.sendPresence($pres({ type: 'unavailable' }), resolve));
+    this.stateSubject.next(Status.DISCONNECTED); // after last send
+    this.disconnect('regular logout');
+    this.reset();
+  }
+
+  /**
+   * Promise resolves if user account is registered successfully,
+   * rejects if an error happens while registering, e.g. the username is already taken.
+   */
+  async register(username: string, password: string, service: string, domain: string): Promise<void> {
+    const nsRegister = 'jabber:iq:register';
+
+    let registering = false;
+    let processed_features = false;
+    let connect_cb_data: { req: Element } = { req: null };
+
+    if (username.indexOf('@') > -1) {
+      log(LogLevel.WARN, 'username should not contain domain, only local part, this can lead to errors!');
+    }
+
+    await this.logOut();
+    const conn = await Connection.create(service, domain);
+
+    const readyToStartRegistration = new Promise<void>((resolve) => {
+      // hooking strophe's _connect_cb
+      const connect_callback = conn._connect_cb.bind(conn);
+      conn._connect_cb = (req, callback) => {
+        if (registering) {
+          // Save this request in case we want to authenticate later
+          connect_cb_data = { req };
+          resolve();
+          return;
+        }
+
+        if (processed_features) {
+          // exchange Input hooks to not print the stream:features twice
+          const xmlInput = (el: Element): void => conn.xmlInput(el);
+          conn.xmlInput = () => {};
+          connect_callback(req, callback);
+          conn.xmlInput = xmlInput;
+        }
+
+        connect_callback(req, callback);
+      };
+
+      // hooking strophe`s authenticate
+      const auth_old = async (matched: SASLMechanism[]): Promise<void> => conn.authenticate(matched);
+      conn.authenticate = async (matched: SASLMechanism[]): Promise<void> => {
+        const isMatched = typeof matched !== 'undefined';
+        if (isMatched) {
+          await auth_old(matched);
+          return;
+        }
+
+        if (!username || !domain || !password) {
+          return;
+        }
+
+        conn.jid = username + '@' + domain;
+        conn.authzid = getBareJidFromJid(conn.jid);
+        conn.authcid = getNodeFromJid(conn.jid);
+        conn.pass = password;
+
+        const req = connect_cb_data.req;
+        conn._connect_cb(req, connect_callback);
+      };
+    });
+
+    // anonymous connection
+    await conn.connect(
+      domain,
+      '',
+      this.createConnectionStatusHandler(
+        username,
+        domain,
+        () => {},
+        () => {}
+      )
+    );
+
+    registering = true;
+    await readyToStartRegistration;
+
+    await this.queryForRegistrationForm(conn, nsRegister);
+    await this.submitRegisterInformationQuery(conn, username, password, nsRegister);
+
+    registering = false;
+    processed_features = true;
+    // here we should have switched after processing the feature's stanza to the regular callback after login
+    conn.reset();
+    await this.logOut();
+    await this.loginNew(username, domain, service, password);
+  }
+
+  private async queryForRegistrationForm(conn: Connection, nsRegister: string): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      // send a get request for registration, to get all required data fields
+      conn._addSysHandler(
+        (stanza) => {
+          const query = stanza.getElementsByTagName('query');
+          if (query.length !== 1) {
+            conn._changeConnectStatus(Status.REGIFAIL, 'unknown');
+            reject('registration failed by unknown reason');
+            return false;
+          }
+
+          conn._changeConnectStatus(Status.REGISTER, null);
+
+          resolve();
+          return false;
+        },
+        null,
+        'iq',
+        null,
+        null
+      );
+
+      conn.sendIQ($iq({ type: 'get' }).c('query', { xmlns: nsRegister }).tree());
+    });
+  }
+
+  private async submitRegisterInformationQuery(conn: Connection, username: string, password: string, nsRegister: string): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      conn._addSysHandler(
+        (stanza) => {
+          let error = null;
+
+          if (stanza.getAttribute('type') === 'error') {
+            error = stanza.getElementsByTagName('error');
+            if (error.length !== 1) {
+              conn._changeConnectStatus(Status.REGIFAIL, 'unknown');
+              reject();
+              return false;
+            }
+
+            // this is either 'conflict' or 'not-acceptable'
+            error = error[0].firstChild.nodeName.toLowerCase();
+            if (error === 'conflict') {
+              conn._changeConnectStatus(Status.CONFLICT, error);
+              reject();
+            } else if (error === 'not-acceptable') {
+              conn._changeConnectStatus(Status.NOTACCEPTABLE, error);
+              reject();
+            } else {
+              conn._changeConnectStatus(Status.REGIFAIL, error);
+              reject();
+            }
+          } else {
+            conn._changeConnectStatus(Status.REGISTERED, null);
+            resolve();
+          }
+
+          return false; // makes strophe delete the sysHandler
+        },
+        null,
+        'iq',
+        null,
+        null
+      );
+
+      conn.sendIQ($iq({ type: 'set' }).c('query', { xmlns: nsRegister }).c('username', {}, username).c('password', {}, password));
+    });
+  }
+
   /**
    * Called as soon as a new connection has been established, either
    * by logging in or by attaching to an existing BOSH session.
@@ -2411,22 +2660,6 @@ export class Connection {
     } else if (status === Status.DISCONNECTING) {
       this.setDisconnectionCause(status, message);
     }
-  }
-
-  /**
-   * Stores the passed in JID for the current user, potentially creating a
-   * resource if the JID is bare.
-   *
-   * @emits userJidSubject
-   * @param {string} jid
-   */
-  setUserJID(jid: string): string {
-    /**
-     * Triggered whenever the user's JID has been updated
-     */
-    this.jid = jid;
-    this.userJidSubject.next(this.jid);
-    return this.jid;
   }
 
   private clearSession(): void {

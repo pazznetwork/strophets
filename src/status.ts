@@ -1,7 +1,5 @@
-
-
-/** Constants: Connection Status Constants
- *  Connection status constants for use by the connection handler
+/**
+ *   Connection status constants for use by the connection handler
  *  callback.
  *
  *  Status.ERROR - An error has occurred
@@ -31,4 +29,9 @@ export enum Status {
   BINDREQUIRED = 11,
   ATTACHFAIL = 12,
   RECONNECTING = 13,
+  REGIFAIL = 14,
+  REGISTER = 15,
+  REGISTERED = 16,
+  CONFLICT = 17,
+  NOTACCEPTABLE = 18
 }
