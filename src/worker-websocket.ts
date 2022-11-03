@@ -67,12 +67,12 @@ export class WorkerWebsocket extends StropheWebsocket {
       this.connection.authenticated = true;
       this.connection.connected = true;
       this.connection.restored = true;
-      this.connection._changeConnectStatus(Status.ATTACHED);
+      this.connection.changeConnectStatus(Status.ATTACHED);
     } else if (status === Status.ATTACHFAIL) {
       this.connection.authenticated = false;
       this.connection.connected = false;
       this.connection.restored = false;
-      this.connection._changeConnectStatus(Status.ATTACHFAIL);
+      this.connection.changeConnectStatus(Status.ATTACHFAIL);
     }
   }
 
@@ -82,21 +82,21 @@ export class WorkerWebsocket extends StropheWebsocket {
     this.connection.xmlOutput(close.tree());
     const closeString = serialize(close);
     this.worker.port.postMessage(['send', closeString]);
-    this.connection._doDisconnect();
+    this.connection.doDisconnect();
   }
 
   _onClose(e: CloseEvent) {
     if (this.connection.connected && !this.connection.disconnecting) {
       error('Websocket closed unexpectedly');
-      this.connection._doDisconnect();
+      this.connection.doDisconnect();
     } else if (e && e.code === 1006 && !this.connection.connected) {
       // in case the onError callback was not called (Safari 10 does not
       // call onerror when the initial connection fails) we need to
       // dispatch a CONNFAIL status update to be consistent with the
       // behavior on other browsers.
       error('Websocket closed unexcectedly');
-      this.connection._changeConnectStatus(Status.CONNFAIL, 'The WebSocket connection could not be established or was disconnected.');
-      this.connection._doDisconnect();
+      this.connection.changeConnectStatus(Status.CONNFAIL, 'The WebSocket connection could not be established or was disconnected.');
+      this.connection.doDisconnect();
     } else {
       debug('Websocket closed');
     }

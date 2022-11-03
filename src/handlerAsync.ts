@@ -1,6 +1,4 @@
-/** PrivateClass: Strophe.Handler
- *  _Private_ helper class for managing stanza handlers.
- *
+/**
  *  A Strophe.Handler encapsulates a user provided callback function to be
  *  executed when matching stanzas are received by the connection.
  *  Handlers can be either one-off or persistent depending on their
@@ -14,7 +12,7 @@
 import { forEachChild, getBareJidFromJid, isTagEqual } from './xml';
 import { handleError } from './error';
 
-export class Handler {
+export class HandlerAsync {
   private options: { matchBareFromJid?: boolean; ignoreNamespaceFragment: boolean };
   user: boolean;
 
@@ -32,7 +30,7 @@ export class Handler {
    * @param options matchBareFromJid match only the local and domain of the jid, ignoreNamespaceFragment ignores '#' in namespace
    */
   constructor(
-    private readonly handler: (stanza: Element) => boolean,
+    private readonly handler: (stanza: Element) => Promise<boolean>,
     private readonly ns: string,
     private readonly name: string,
     private readonly type: string | string[],
@@ -128,10 +126,10 @@ export class Handler {
    *  Returns:
    *    @returns A boolean indicating if the handler should remain active.
    */
-  run(elem: Element): boolean {
+  async run(elem: Element): Promise<boolean> {
     let result = null;
     try {
-      result = this.handler(elem);
+      result = await this.handler(elem);
     } catch (e) {
       handleError(e);
       throw e;

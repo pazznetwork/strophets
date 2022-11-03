@@ -103,15 +103,15 @@ function generate_cnonce() {
  * On failure, returns connection._sasl_failure_cb();
  */
 export async function scramResponse(connection: Connection, challenge: string, hashName: string, hashBits: number) {
-  const cnonce = connection.sasl_data.cnonce as string;
+  const cnonce = connection.saslData.cnonce as string;
   const challengeData = scramParseChallenge(challenge);
 
   // The RFC requires that we verify the (server) nonce has the client
   // nonce as an initial substring.
   if (!challengeData && challengeData?.nonce.slice(0, cnonce.length) !== cnonce) {
     warn('Failing SCRAM authentication because server supplied incorrect nonce.');
-    connection.sasl_data = {};
-    return connection._sasl_failure_cb();
+    connection.saslData = {};
+    return connection.saslFailureCb();
   }
 
   let clientKey, serverKey;
@@ -130,11 +130,11 @@ export async function scramResponse(connection: Connection, challenge: string, h
     clientKey = keys.ck;
     serverKey = keys.sk;
   } else {
-    connection._sasl_failure_cb();
+    connection.saslFailureCb();
     return new Error('SASL SCRAM ERROR');
   }
 
-  const clientFirstMessageBare = connection.sasl_data['client-first-message-bare'];
+  const clientFirstMessageBare = connection.saslData['client-first-message-bare'];
   const serverFirstMessage = challenge;
   const clientFinalMessageBare = `c=biws,r=${challengeData.nonce}`;
 
@@ -143,8 +143,8 @@ export async function scramResponse(connection: Connection, challenge: string, h
   const clientProof = await scramClientProof(authMessage, clientKey, hashName);
   const serverSignature = await scramServerSign(authMessage, serverKey, hashName);
 
-  connection.sasl_data['server-signature'] = arrayBufToBase64(serverSignature);
-  connection.sasl_data.keys = {
+  connection.saslData['server-signature'] = arrayBufToBase64(serverSignature);
+  connection.saslData.keys = {
     name: hashName,
     iter: challengeData.iter,
     salt: arrayBufToBase64(challengeData.salt),
@@ -159,7 +159,7 @@ export async function scramResponse(connection: Connection, challenge: string, h
 export function clientChallenge(connection: Connection, test_cnonce: string) {
   const cnonce = test_cnonce || generate_cnonce();
   const client_first_message_bare = `n=${connection.authcid},r=${cnonce}`;
-  connection.sasl_data.cnonce = cnonce;
-  connection.sasl_data['client-first-message-bare'] = client_first_message_bare;
+  connection.saslData.cnonce = cnonce;
+  connection.saslData['client-first-message-bare'] = client_first_message_bare;
   return `n,,${client_first_message_bare}`;
 }

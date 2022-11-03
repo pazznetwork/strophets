@@ -52,7 +52,7 @@ export interface ProtocolManager {
    *
    *  Just closes the Socket for WebSockets
    */
-  _doDisconnect(): void;
+  doDisconnect(): void;
 
   /**
    * _Private_ function to check if the message queue is empty.

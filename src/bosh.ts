@@ -123,7 +123,7 @@ export class Bosh implements ProtocolManager {
     if (this.sid !== null) {
       bodyWrap.attrs({ sid: this.sid });
     }
-    if (this.connection.options.keepalive && this.connection.isSessionCachingSupported()) {
+    if (this.connection.options.keepalive) {
       this._cacheSession();
     }
     return bodyWrap;
@@ -138,9 +138,7 @@ export class Bosh implements ProtocolManager {
     this.rid = Math.floor(Math.random() * 4294967295);
     this.sid = null;
     this.errors = 0;
-    if (this.connection.isSessionCachingSupported()) {
-      window.sessionStorage.removeItem('strophe-bosh-session');
-    }
+    globalThis.sessionStorage.removeItem('strophe-bosh-session');
 
     this.connection.nextValidRid(this.rid);
   }
@@ -191,7 +189,7 @@ export class Bosh implements ProtocolManager {
     this.hold = hold || this.hold;
     this.window = wind || this.window;
 
-    this.connection._changeConnectStatus(Status.ATTACHED, null);
+    this.connection.changeConnectStatus(Status.ATTACHED, null);
   }
 
   /** PrivateFunction: _restore
@@ -285,11 +283,11 @@ export class Bosh implements ProtocolManager {
         if (cond === 'remote-stream-error' && conflict.length > 0) {
           cond = 'conflict';
         }
-        this.connection._changeConnectStatus(Status.CONNFAIL, cond);
+        this.connection.changeConnectStatus(Status.CONNFAIL, cond);
       } else {
-        this.connection._changeConnectStatus(Status.CONNFAIL, 'unknown');
+        this.connection.changeConnectStatus(Status.CONNFAIL, 'unknown');
       }
-      this.connection._doDisconnect(cond);
+      this.connection.doDisconnect(cond);
       return Status.CONNFAIL;
     }
 
@@ -333,12 +331,10 @@ export class Bosh implements ProtocolManager {
    *
    *  Resets the SID and RID.
    */
-  _doDisconnect() {
+  doDisconnect() {
     this.sid = null;
     this.rid = Math.floor(Math.random() * 4294967295);
-    if (this.connection.isSessionCachingSupported()) {
-      window.sessionStorage.removeItem('strophe-bosh-session');
-    }
+    globalThis.sessionStorage.removeItem('strophe-bosh-session');
 
     this.connection.nextValidRid(this.rid);
   }
@@ -567,8 +563,8 @@ export class Bosh implements ProtocolManager {
       this._hitError(reqStatus);
       this._callProtocolErrorHandlers(req);
       if (reqStatus >= 400 && reqStatus < 500) {
-        this.connection._changeConnectStatus(Status.DISCONNECTING, null);
-        this.connection._doDisconnect();
+        this.connection.changeConnectStatus(Status.DISCONNECTING, null);
+        this.connection.doDisconnect();
       }
     } else {
       error('request id ' + req.id + '.' + req.sends + ' error ' + reqStatus + ' happened');
@@ -577,7 +573,7 @@ export class Bosh implements ProtocolManager {
     if (!valid_request && !too_many_retries) {
       this._throttledRequestHandler();
     } else if (too_many_retries && !this.connection.connected) {
-      this.connection._changeConnectStatus(Status.CONNFAIL, 'giving-up');
+      this.connection.changeConnectStatus(Status.CONNFAIL, 'giving-up');
     }
   }
 
@@ -632,7 +628,7 @@ export class Bosh implements ProtocolManager {
       } catch (e2) {
         error('XHR open failed: ' + e2.toString());
         if (!this.connection.connected) {
-          this.connection._changeConnectStatus(Status.CONNFAIL, 'bad-service');
+          this.connection.changeConnectStatus(Status.CONNFAIL, 'bad-service');
         }
         this.connection.disconnect();
         return;

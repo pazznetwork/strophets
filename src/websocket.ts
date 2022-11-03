@@ -130,8 +130,8 @@ export class StropheWebsocket implements ProtocolManager {
     error(errorString);
 
     // close the connection on stream_error
-    this.connection._changeConnectStatus(status, condition);
-    this.connection._doDisconnect();
+    this.connection.changeConnectStatus(status, condition);
+    this.connection.doDisconnect();
     return true;
   }
 
@@ -205,8 +205,8 @@ export class StropheWebsocket implements ProtocolManager {
     }
 
     if (errorMessage) {
-      this.connection._changeConnectStatus(Status.CONNFAIL, errorMessage);
-      this.connection._doDisconnect();
+      this.connection.changeConnectStatus(Status.CONNFAIL, errorMessage);
+      this.connection.doDisconnect();
       return false;
     }
     return true;
@@ -252,14 +252,14 @@ export class StropheWebsocket implements ProtocolManager {
           throw new Error('BAD REFACTOR!!!!');
         }
         if (isSecureRedirect) {
-          this.connection._changeConnectStatus(Status.REDIRECT, 'Received see-other-uri, resetting connection');
+          this.connection.changeConnectStatus(Status.REDIRECT, 'Received see-other-uri, resetting connection');
           this.connection.reset();
           this.connection.service = see_uri;
           this._connect();
         }
       } else {
-        this.connection._changeConnectStatus(Status.CONNFAIL, 'Received closing stream');
-        this.connection._doDisconnect();
+        this.connection.changeConnectStatus(Status.CONNFAIL, 'Received closing stream');
+        this.connection.doDisconnect();
       }
     } else {
       this._replaceMessageHandler();
@@ -302,7 +302,7 @@ export class StropheWebsocket implements ProtocolManager {
         warn("Couldn't send <close /> tag.");
       }
     }
-    setTimeout(() => this.connection._doDisconnect(), 0);
+    setTimeout(() => this.connection.doDisconnect(), 0);
   }
 
   /** PrivateFunction: _doDisconnect
@@ -310,7 +310,7 @@ export class StropheWebsocket implements ProtocolManager {
    *
    *  Just closes the Socket for WebSockets
    */
-  _doDisconnect() {
+  doDisconnect() {
     debug('WebSockets _doDisconnect was called');
     this._closeSocket();
   }
@@ -358,15 +358,15 @@ export class StropheWebsocket implements ProtocolManager {
   _onClose(e: CloseEvent) {
     if (this.connection.connected && !this.connection.disconnecting) {
       error('Websocket closed unexpectedly');
-      this.connection._doDisconnect();
+      this.connection.doDisconnect();
     } else if (e && e.code === 1006 && !this.connection.connected && this.socket) {
       // in case the onError callback was not called (Safari 10 does not
       // call onerror when the initial connection fails) we need to
       // dispatch a CONNFAIL status update to be consistent with the
       // behavior on other browsers.
       error('Websocket closed unexcectedly');
-      this.connection._changeConnectStatus(Status.CONNFAIL, 'The WebSocket connection could not be established or was disconnected.');
-      this.connection._doDisconnect();
+      this.connection.changeConnectStatus(Status.CONNFAIL, 'The WebSocket connection could not be established or was disconnected.');
+      this.connection.doDisconnect();
     } else {
       debug('Websocket closed');
     }
@@ -379,11 +379,11 @@ export class StropheWebsocket implements ProtocolManager {
    */
   _no_auth_received(callback: () => void) {
     error('Server did not offer a supported authentication mechanism');
-    this.connection._changeConnectStatus(Status.CONNFAIL, ErrorCondition.NO_AUTH_MECH);
+    this.connection.changeConnectStatus(Status.CONNFAIL, ErrorCondition.NO_AUTH_MECH);
     if (callback) {
       callback.call(this.connection);
     }
-    this.connection._doDisconnect();
+    this.connection.doDisconnect();
   }
 
   /** PrivateFunction: _onDisconnectTimeout
@@ -406,7 +406,7 @@ export class StropheWebsocket implements ProtocolManager {
    */
   _onError(webSocketError: Event) {
     error('Websocket error ' + JSON.stringify(webSocketError));
-    this.connection._changeConnectStatus(Status.CONNFAIL, 'The WebSocket connection could not be established or was disconnected.');
+    this.connection.changeConnectStatus(Status.CONNFAIL, 'The WebSocket connection could not be established or was disconnected.');
     this._disconnect();
   }
 
@@ -461,7 +461,7 @@ export class StropheWebsocket implements ProtocolManager {
       this.connection.xmlInput(message.data);
       this.stanzasInSubject.next(message.data);
       if (!this.connection.disconnecting) {
-        this.connection._doDisconnect();
+        this.connection.doDisconnect();
       }
       return;
     } else if (message.data.search('<open ') === 0) {
