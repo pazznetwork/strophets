@@ -1,4 +1,4 @@
-import { SASLMechanismBase } from './sasl.js';
+import { SASLMechanismBase } from './sasl';
 import { Connection } from './connection';
 import { utf16to8 } from './utils';
 

@@ -1,5 +1,5 @@
-import { SASLMechanismBase } from './sasl.js';
-import { clientChallenge, scramResponse } from './scram.js';
+import { SASLMechanismBase } from './sasl';
+import { clientChallenge, scramResponse } from './scram';
 import { Connection } from './connection';
 
 export class SASLSHA512 extends SASLMechanismBase {

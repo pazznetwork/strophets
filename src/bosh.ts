@@ -19,7 +19,7 @@ export class Bosh implements ProtocolManager {
   // default BOSH values
   hold = 1;
   wait = 60;
-  window = 5;
+  limit = 5;
   errors = 0;
   private inactivity: number;
 
@@ -30,8 +30,7 @@ export class Bosh implements ProtocolManager {
   private readonly noResumeableBOSHSessionSubject = new Subject<void>();
   noResumeableBOSHSession$ = this.noResumeableBOSHSessionSubject.asObservable();
 
-  /** Variable: strip
-   *
+  /**
    *  BOSH-Connections will have all stanzas wrapped in a <body> tag when
    *  passed to <Strophe.Connection.xmlInput> or <Strophe.Connection.xmlOutput>.
    *  To strip this tag, User code can set <Strophe.Bosh.strip> to "body":
@@ -45,7 +44,7 @@ export class Bosh implements ProtocolManager {
 
   jid: string;
 
-  /** PrivateConstructor: Strophe.Bosh
+  /**
    *  Create and initialize a Strophe.Bosh object.
    *
    *  Parameters:
@@ -65,8 +64,8 @@ export class Bosh implements ProtocolManager {
     this._requests = [];
   }
 
-  /** PrivateFunction: _connect
-   *  _Private_ function that initializes the BOSH connection.
+  /**
+   *  function that initializes the BOSH connection.
    *
    *  Creates and sends the Request that initializes the BOSH connection.
    *
@@ -78,9 +77,9 @@ export class Bosh implements ProtocolManager {
    *      should almost always be set to 1 (the default).
    * @param route - The optional route value.
    */
-  _connect(wait?: number, hold?: number, route?: string) {
-    this.wait = wait || this.wait;
-    this.hold = hold || this.hold;
+  connect(wait?: number, hold?: number, route?: string) {
+    this.wait |= wait;
+    this.hold |= hold;
     this.errors = 0;
 
     const body = this._buildBody().attrs({
@@ -98,11 +97,11 @@ export class Bosh implements ProtocolManager {
     }
 
     // eslint-disable-next-line @typescript-eslint/unbound-method
-    const _connect_cb = this.connection._connect_cb;
+    const connectCb = this.connection._connect_cb;
     this._requests.push(
       new Request(
         body.tree(),
-        this._onRequestStateChange.bind(this, _connect_cb.bind(this.connection)),
+        this._onRequestStateChange.bind(this, connectCb.bind(this.connection)),
         Number.parseInt(body.tree().getAttribute('rid'), 10)
       )
     );
@@ -110,10 +109,10 @@ export class Bosh implements ProtocolManager {
   }
 
   /**
-   *  _Private_ helper function to generate the <body/> wrapper for BOSH.
+   *  helper function to generate the <body/> wrapper for BOSH.
    *
    *  Returns:
-   *    A Strophe.Builder with a <body/> element.
+   *    A Builder with a <body/> element.
    */
   _buildBody() {
     const bodyWrap = $build('body', {
@@ -129,7 +128,7 @@ export class Bosh implements ProtocolManager {
     return bodyWrap;
   }
 
-  /** PrivateFunction: _reset
+  /**
    *  Reset the connection.
    *
    *  This function is called by the reset function of the Strophe Connection
@@ -143,7 +142,7 @@ export class Bosh implements ProtocolManager {
     this.connection.nextValidRid(this.rid);
   }
 
-  /** PrivateFunction: _attach
+  /**
    *  Attach to an already created and authenticated BOSH session.
    *
    *  This function is provided to allow Strophe to attach to BOSH
@@ -164,17 +163,17 @@ export class Bosh implements ProtocolManager {
    *    (Integer) hold - The optional HTTPBIND hold value.  This is the
    *      number of connections the server will hold at one time.  This
    *      should almost always be set to 1 (the default).
-   *    (Integer) wind - The optional HTTBIND window value.  This is the
+   *    (Integer) limit - The optional HTTBIND limitow value.  This is the
    *      allowed range of request ids that are valid.  The default is 5.
    */
-  _attach(
+  attach(
     jid: string,
     sid: string,
     rid: number,
     callback: (status: number, condition: string, elem: Element) => unknown,
     wait: number,
     hold: number,
-    wind: number
+    limit: number
   ): void {
     this.connection.jid = jid;
     this.sid = sid;
@@ -185,14 +184,14 @@ export class Bosh implements ProtocolManager {
     this.connection.authenticated = true;
     this.connection.connected = true;
 
-    this.wait = wait || this.wait;
-    this.hold = hold || this.hold;
-    this.window = wind || this.window;
+    this.wait |= wait;
+    this.hold |= hold;
+    this.limit |= limit;
 
     this.connection.changeConnectStatus(Status.ATTACHED, null);
   }
 
-  /** PrivateFunction: _restore
+  /**
    *  Attempt to restore a cached BOSH session
    *
    *  Parameters:
@@ -208,15 +207,15 @@ export class Bosh implements ProtocolManager {
    *    (Integer) hold - The optional HTTPBIND hold value.  This is the
    *      number of connections the server will hold at one time.  This
    *      should almost always be set to 1 (the default).
-   *    (Integer) wind - The optional HTTBIND window value.  This is the
+   *    (Integer) limit - The optional HTTBIND window value.  This is the
    *      allowed range of request ids that are valid.  The default is 5.
    */
-  _restore(
+  restore(
     jid: string,
     callback: (status: number, condition: string, elem: Element) => unknown,
     wait?: number,
     hold?: number,
-    wind?: number
+    limit?: number
   ): void {
     const session = JSON.parse(window.sessionStorage.getItem('strophe-bosh-session'));
     if (
@@ -233,7 +232,7 @@ export class Bosh implements ProtocolManager {
         (getNodeFromJid(jid) === null && getDomainFromJid(session.jid) === jid))
     ) {
       this.connection.restored = true;
-      this._attach(session.jid, session.sid, session.rid, callback, wait, hold, wind);
+      this.attach(session.jid, session.sid, session.rid, callback, wait, hold, limit);
     } else {
       const namedError = new Error('_restore: no restoreable session.');
       namedError.name = 'StropheSessionError';
@@ -241,8 +240,8 @@ export class Bosh implements ProtocolManager {
     }
   }
 
-  /** PrivateFunction: _cacheSession
-   *  _Private_ handler for the beforeunload event.
+  /**
+   *  handler for the beforeunload event.
    *
    *  This handler is used to process the Bosh-part of the initial request.
    *  Parameters:
@@ -265,14 +264,14 @@ export class Bosh implements ProtocolManager {
     }
   }
 
-  /** PrivateFunction: _connect_cb
-   *  _Private_ handler for initial connection request.
+  /**
+   *  handler for initial connection request.
    *
    *  This handler is used to process the Bosh-part of the initial request.
    *  Parameters:
    *    (Strophe.Request) bodyWrap - The received stanza.
    */
-  _connect_cb(bodyWrap: Element) {
+  connectCb(bodyWrap: Element) {
     const typ = bodyWrap.getAttribute('type');
     if (typ !== null && typ === 'terminate') {
       // an error occurred
@@ -298,7 +297,7 @@ export class Bosh implements ProtocolManager {
     }
     const wind = bodyWrap.getAttribute('requests');
     if (wind) {
-      this.window = parseInt(wind, 10);
+      this.limit = parseInt(wind, 10);
     }
     const hold = bodyWrap.getAttribute('hold');
     if (hold) {
@@ -316,18 +315,18 @@ export class Bosh implements ProtocolManager {
     return Status.CONNECTED;
   }
 
-  /** PrivateFunction: _disconnect
-   *  _Private_ part of Connection.disconnect for Bosh
+  /**
+   *  part of Connection.disconnect for Bosh
    *
    *  Parameters:
    *    (Request) pres - This stanza will be sent before disconnecting.
    */
-  _disconnect(pres: Element) {
+  disconnect(pres: Element) {
     this._sendTerminate(pres);
   }
 
-  /** PrivateFunction: _doDisconnect
-   *  _Private_ function to disconnect.
+  /**
+   *  function to disconnect.
    *
    *  Resets the SID and RID.
    */
@@ -339,18 +338,18 @@ export class Bosh implements ProtocolManager {
     this.connection.nextValidRid(this.rid);
   }
 
-  /** PrivateFunction: _emptyQueue
-   * _Private_ function to check if the Request queue is empty.
+  /**
+   function to check if the Request queue is empty.
    *
    *  Returns:
    *    True, if there are no Requests queued, False otherwise.
    */
-  _emptyQueue() {
+  emptyQueue() {
     return this._requests.length === 0;
   }
 
-  /** PrivateFunction: _callProtocolErrorHandlers
-   *  _Private_ function to call error handlers registered for HTTP errors.
+  /**
+   *  function to call error handlers registered for HTTP errors.
    *
    *  Parameters:
    *    (Strophe.Request) req - The request that is changing readyState.
@@ -363,8 +362,8 @@ export class Bosh implements ProtocolManager {
     }
   }
 
-  /** PrivateFunction: _hitError
-   *  _Private_ function to handle the error count.
+  /**
+   *  function to handle the error count.
    *
    *  Requests are resent automatically until their error count reaches
    *  5.  Each time an error is encountered, this function is called to
@@ -381,12 +380,11 @@ export class Bosh implements ProtocolManager {
     }
   }
 
-  /** PrivateFunction: _no_auth_received
-   *
+  /**
    * Called on stream start/restart when no stream:features
    * has been received and sends a blank poll request.
    */
-  _no_auth_received(callback: () => void) {
+  noAuthReceived(callback: () => void) {
     warn('Server did not yet offer a supported authentication ' + 'mechanism. Sending a blank poll request.');
     if (callback) {
       callback = callback.bind(this.connection);
@@ -400,19 +398,19 @@ export class Bosh implements ProtocolManager {
     this._throttledRequestHandler();
   }
 
-  /** PrivateFunction: _onDisconnectTimeout
-   *  _Private_ timeout handler for handling non-graceful disconnection.
+  /**
+   *  timeout handler for handling non-graceful disconnection.
    *
    *  Cancels all remaining Requests and clears the queue.
    */
-  _onDisconnectTimeout() {
-    this._abortAllRequests();
+  onDisconnectTimeout() {
+    this.abortAllRequests();
   }
 
-  /** PrivateFunction: _abortAllRequests
-   *  _Private_ helper function that makes sure all pending requests are aborted.
+  /**
+   *  helper function that makes sure all pending requests are aborted.
    */
-  _abortAllRequests() {
+  abortAllRequests() {
     while (this._requests.length > 0) {
       const req = this._requests.pop();
       req.abort = true;
@@ -421,12 +419,12 @@ export class Bosh implements ProtocolManager {
     }
   }
 
-  /** PrivateFunction: _onIdle
-   *  _Private_ handler called by Strophe.Connection._onIdle
+  /**
+   *  handler called by Strophe.Connection._onIdle
    *
    *  Sends all queued Requests or polls with empty Request if there are none.
    */
-  _onIdle() {
+  onIdle() {
     const data = this.connection.data;
     // if no requests are in progress, poll
     if (this.connection.authenticated && this._requests.length === 0 && data.length === 0 && !this.connection.disconnecting) {
@@ -477,7 +475,7 @@ export class Bosh implements ProtocolManager {
     }
   }
 
-  /** PrivateFunction: _getRequestStatus
+  /**
    *
    *  Returns the HTTP status code from a Strophe.Request
    *
@@ -503,8 +501,8 @@ export class Bosh implements ProtocolManager {
     return reqStatus;
   }
 
-  /** PrivateFunction: _onRequestStateChange
-   *  _Private_ handler for Strophe.Request state changes.
+  /**
+   *  handler for Strophe.Request state changes.
    *
    *  This function is called when the XMLHttpRequest readyState changes.
    *  It contains a lot of error handling logic for the many ways that
@@ -515,7 +513,7 @@ export class Bosh implements ProtocolManager {
    *    (Function) func - The handler for the request.
    *    (Strophe.Request) req - The request that is changing readyState.
    */
-  _onRequestStateChange(func: (req: Request, raw?: string) => void, req: Request) {
+  _onRequestStateChange(func: (req: Request) => void, req: Request) {
     debug('request id ' + req.id + '.' + req.sends + ' state changed to ' + req.xhr.readyState);
     if (req.abort) {
       req.abort = false;
@@ -577,8 +575,8 @@ export class Bosh implements ProtocolManager {
     }
   }
 
-  /** PrivateFunction: _processRequest
-   *  _Private_ function to process a request in the queue.
+  /**
+   *  function to process a request in the queue.
    *
    *  This function takes requests off the queue and sends them and
    *  restarts dead requests.
@@ -675,8 +673,8 @@ export class Bosh implements ProtocolManager {
     }
   }
 
-  /** PrivateFunction: _removeRequest
-   *  _Private_ function to remove a request from the queue.
+  /**
+   *  function to remove a request from the queue.
    *
    *  Parameters:
    *    (Strophe.Request) req - The request to remove.
@@ -693,8 +691,8 @@ export class Bosh implements ProtocolManager {
     this._throttledRequestHandler();
   }
 
-  /** PrivateFunction: _restartRequest
-   *  _Private_ function to restart a request that is presumed dead.
+  /**
+   *  function to restart a request that is presumed dead.
    *
    *  Parameters:
    *    (Integer) i - The index of the request in the queue.
@@ -707,8 +705,8 @@ export class Bosh implements ProtocolManager {
     this._processRequest(i);
   }
 
-  /** PrivateFunction: _reqToData
-   * _Private_ function to get a stanza out of a request.
+  /**
+   function to get a stanza out of a request.
    *
    * Tries to extract a stanza out of a Request Object.
    * When this fails the current connection will be disconnected.
@@ -719,7 +717,7 @@ export class Bosh implements ProtocolManager {
    *  Returns:
    *    The stanza that was passed.
    */
-  _reqToData(req: Request): Element {
+  reqToData(req: Request): Element {
     try {
       return req.getResponse();
     } catch (e) {
@@ -731,8 +729,8 @@ export class Bosh implements ProtocolManager {
     return null;
   }
 
-  /** PrivateFunction: _sendTerminate
-   *  _Private_ function to send initial disconnect sequence.
+  /**
+   *  function to send initial disconnect sequence.
    *
    *  This is the first step in a graceful disconnect.  It sends
    *  the BOSH server a terminated body and includes an unavailable
@@ -753,29 +751,29 @@ export class Bosh implements ProtocolManager {
     this._throttledRequestHandler();
   }
 
-  /** PrivateFunction: _send
-   *  _Private_ part of the Connection.send function for BOSH
+  /**
+   *  part of the Connection.send function for BOSH
    *
    * Just triggers the RequestHandler to send the messages that are in the queue
    */
-  _send() {
+  send() {
     clearTimeout(this.connection.idleTimeout);
     this._throttledRequestHandler();
     // @ts-ignore
     this.connection.idleTimeout = setTimeout(() => this.connection._onIdle(), 100);
   }
 
-  /** PrivateFunction: _sendRestart
+  /**
    *
    *  Send an xmpp:restart stanza.
    */
-  _sendRestart() {
+  sendRestart() {
     this._throttledRequestHandler();
     clearTimeout(this.connection.idleTimeout);
   }
 
-  /** PrivateFunction: _throttledRequestHandler
-   *  _Private_ function to throttle requests to the connection window.
+  /**
+   *  function to throttle requests to the connection window.
    *
    *  This function makes sure we don't send requests so fast that the
    *  request ids overflow the connection window in the case that one
@@ -796,7 +794,7 @@ export class Bosh implements ProtocolManager {
       this._processRequest(0);
     }
 
-    if (this._requests.length > 1 && Math.abs(this._requests[0].rid - this._requests[1].rid) < this.window) {
+    if (this._requests.length > 1 && Math.abs(this._requests[0].rid - this._requests[1].rid) < this.limit) {
       this._processRequest(1);
     }
   }
@@ -804,28 +802,20 @@ export class Bosh implements ProtocolManager {
   restoreBOSHSession(): boolean {
     const jid = this.initBOSHSession();
     try {
-      this._restore(jid, async (status, condition, _elem) => this.connection.onConnectStatusChanged(status, condition));
+      this.restore(jid, async (status, condition) => this.connection.onConnectStatusChanged(status, condition));
       return true;
-    } catch (e) {
-      return false;
-    }
+    } catch (e) {}
+    return false;
   }
 
   initBOSHSession(): string {
-    // new session
-    if (this.connection.jid && this.jid !== this.connection.jid) {
-      this.jid = this.connection.setUserJID(this.connection.jid);
-      return this.jid;
-    }
-    // Keepalive
-    this.jid && this.connection.setUserJID(this.jid);
+    // new session from connection, this.jid keepalive
+    const jid = this.connection.jid ?? this.jid;
+    this.jid = this.connection.setUserJID(jid);
     return this.jid;
   }
 
   startNewPreboundBOSHSession(): void {
-    if (!this.prebindUrl) {
-      throw new Error('startNewPreboundBOSHSession: If you use prebind then you MUST supply a prebind_url');
-    }
     const xhr = new XMLHttpRequest();
     xhr.open('GET', this.prebindUrl, true);
     xhr.setRequestHeader('Accept', 'application/json, text/javascript');
@@ -840,16 +830,12 @@ export class Bosh implements ProtocolManager {
     };
     xhr.onerror = () => {
       this.connection.killSessionBosh();
-      this.destroy();
+      this.destroySubject.next();
       /**
        * Triggered when fetching prebind tokens failed
        */
       this.noResumeableBOSHSessionSubject.next();
     };
     xhr.send();
-  }
-
-  destroy(): void {
-    this.destroySubject.next();
   }
 }

@@ -72,15 +72,4 @@ export interface WebsocketOptions {
    *  variants if the current connection to the site is also secure (https).
    */
   protocol?: string;
-  /**
-   * worker - WebSocket option:
-   *  Set this option to URL from where the shared worker script should be loaded.
-   *
-   *  To run the websocket connection inside a shared worker.
-   *  This allows you to share a single websocket-based connection between
-   *  multiple Strophe.Connection instances, for example one per browser tab.
-   *
-   *  The script to use is the one in `src/shared-connection-worker.js`.
-   */
-  worker?: string;
 }

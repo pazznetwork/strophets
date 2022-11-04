@@ -1,4 +1,4 @@
-import { SASLMechanism } from './sasl';
+import { SASLMechanism } from './sasl-mechanism';
 import { Handler } from './handler';
 import { TimedHandler } from './timed-handler';
 import { Status } from './status';
@@ -7,31 +7,18 @@ import { addCookies } from './utils';
 import { NS } from './namespace';
 import { forEachChild, getBareJidFromJid, getDomainFromJid, getNodeFromJid, getResourceFromJid, getText } from './xml';
 import { ErrorCondition, handleError } from './error';
-import { $build, $iq, $pres } from './builder-helper';
+import { $iq, $pres } from './builder-helper';
 import { debug, info, log, LogLevel, warn } from './log';
 import { Bosh } from './bosh';
-import { Request } from './request';
-import { WorkerWebsocket } from './worker-websocket';
 import { StropheWebsocket } from './websocket';
-import { PromiseWrapper } from './promise-wrapper';
-import { SASLExternal } from './sasl-external';
-import { SASLAnonymous } from './sasl-anon';
-import { SASLOAuthBearer } from './sasl-oauthbearer';
-import { SASLXOAuth2 } from './sasl-xoauth2';
-import { SASLPlain } from './sasl-plain';
-import { SASLSHA1 } from './sasl-sha1';
-import { SASLSHA256 } from './sasl-sha256';
-import { SASLSHA384 } from './sasl-sha384';
-import { SASLSHA512 } from './sasl-sha512';
 import { ProtocolManager } from './protocol-manager';
 import { debounceTime, filter, firstValueFrom, from as fromRxjs, Observable, share, shareReplay, startWith, Subject } from 'rxjs';
 import { Matcher, MatcherConfig } from './matcher';
 import { ConnectionOptions } from './connection-options';
 import { AuthenticationMode } from './authentication-mode';
-import { getOpenPromise } from './get-open-promise';
 import { Credentials } from './credentials';
-import { errorMessages } from './error-messages';
 import { HandlerAsync } from './handlerAsync';
+import { Sasl } from './sasl';
 
 /**
  *  XMPP Connection manager.
@@ -77,11 +64,6 @@ export class Connection {
   domain: string = null;
   features: Element;
 
-  // SASL
-  do_bind: boolean;
-  do_session: boolean;
-  mechanism: Record<string, SASLMechanism>;
-
   // handler lists
   timedHandlers: TimedHandler[];
   handlers: Handler[];
@@ -107,21 +89,6 @@ export class Connection {
 
   status: Status;
 
-  /** Variable: authzid
-   *  Set on connection.
-   *  Authorization identity.
-   */
-  authzid: string;
-  /** Variable: authcid
-   *  Set on connection.
-   *  Authentication identity (Username).
-   */
-  authcid: string;
-  /** Variable: pass
-   *  Set on connection.
-   *  Authentication identity (User password).
-   */
-  pass: string | { name: string; salt: string; iter: number; ck: string; sk: string };
   /** parameter: callback
    *  Set on connection.
    *  Callback after connecting.
@@ -160,33 +127,14 @@ export class Connection {
    */
   protocolManager: ProtocolManager;
 
-  workerPromise?: PromiseWrapper<unknown>;
-  saslData: Record<string, unknown>;
-  private mechanisms: SASLMechanism[];
   idleTimeout: number;
   private disconnectTimeout: TimedHandler;
   data: Element[];
   private uniqueId: number;
-  private saslSuccessHandler: Handler;
-  private saslFailureHandler: Handler;
-  private saslChallengeHandler: HandlerAsync;
-  private scramKeys: unknown;
-  private iqFallbackHandler: Handler;
-  private saslMechanism: SASLMechanism;
 
-  private readonly CONNECTION_STATUS = {
-    [Status.ATTACHED]: 'ATTACHED',
-    [Status.AUTHENTICATING]: 'AUTHENTICATING',
-    [Status.AUTHFAIL]: 'AUTHFAIL',
-    [Status.CONNECTED]: 'CONNECTED',
-    [Status.CONNECTING]: 'CONNECTING',
-    [Status.CONNFAIL]: 'CONNFAIL',
-    [Status.DISCONNECTED]: 'DISCONNECTED',
-    [Status.DISCONNECTING]: 'DISCONNECTING',
-    [Status.ERROR]: 'ERROR',
-    [Status.RECONNECTING]: 'RECONNECTING',
-    [Status.REDIRECT]: 'REDIRECT'
-  };
+  private iqFallbackHandler: Handler;
+
+  readonly sasl = new Sasl(this);
 
   get handlePreBind(): boolean {
     return this.authenticationMode === AuthenticationMode.PREBIND && !!this.prebindUrl;
@@ -247,12 +195,6 @@ export class Connection {
     /* stream:features */
     this.features = null;
 
-    // SASL
-    this.saslData = {};
-    this.do_bind = false;
-    this.do_session = false;
-    this.mechanisms = [];
-
     // handler lists
     this.timedHandlers = [];
     this.handlers = [];
@@ -278,10 +220,6 @@ export class Connection {
     this.data = [];
     this.uniqueId = 0;
 
-    this.saslSuccessHandler = null;
-    this.saslFailureHandler = null;
-    this.saslChallengeHandler = null;
-
     // Max retries before disconnecting
     this.maxRetries = 5;
 
@@ -290,7 +228,6 @@ export class Connection {
     this.idleTimeout = setTimeout(() => this._onIdle(), 100);
 
     addCookies(this.options.cookies);
-    this.registerSASLMechanisms(this.options.mechanisms);
 
     // A client must always respond to incoming IQ "set" and "get" stanzas.
     // See https://datatracker.ietf.org/doc/html/rfc6120#section-8.2.3
@@ -324,9 +261,7 @@ export class Connection {
    */
   setProtocol(): void {
     const proto = this.options.protocol || '';
-    if (this.options.worker) {
-      this.protocolManager = new WorkerWebsocket(this, this.stanzasInSubject);
-    } else if (this.service.indexOf('ws:') === 0 || this.service.indexOf('wss:') === 0 || proto.indexOf('ws') === 0) {
+    if (this.service.includes('ws:') || this.service.includes('wss:') || proto.includes('ws')) {
       this.protocolManager = new StropheWebsocket(this, this.stanzasInSubject);
     } else {
       this.protocolManager = new Bosh(this, this.prebindUrl);
@@ -343,8 +278,8 @@ export class Connection {
     this.protocolManager.reset();
 
     // SASL
-    this.do_session = false;
-    this.do_bind = false;
+    this.sasl.doSession = false;
+    this.sasl.doBind = false;
 
     // handler lists
     this.timedHandlers = [];
@@ -414,7 +349,7 @@ export class Connection {
         v = c === 'x' ? r : (r & 0x3) | 0x8;
       return v.toString(16);
     });
-    if (suffix != null) {
+    if (suffix) {
       return uuid + ':' + suffix;
     }
 
@@ -505,28 +440,8 @@ export class Connection {
     }
 
     this.jid = jid;
-    /** Variable: authzid
-     *  Authorization identity.
-     */
-    this.authzid = getBareJidFromJid(this.jid);
 
-    /** Variable: authcid
-     *  Authentication identity (User name).
-     */
-    this.authcid = authcid || getNodeFromJid(this.jid);
-
-    /** Variable: pass
-     *  Authentication identity (User password).
-     *
-     */
-    this.pass = pass;
-
-    /** Variable: scramKeys
-     *  The SASL SCRAM client and server keys. This variable will be populated with a non-null
-     *  object of the above described form after a successful SCRAM connection
-     *
-     */
-    this.scramKeys = null;
+    this.sasl.setVariables(this.jid, pass, authcid);
 
     this.connect_callback = callback;
     this.disconnecting = false;
@@ -540,7 +455,7 @@ export class Connection {
 
     this.changeConnectStatus(Status.CONNECTING, null);
 
-    this.protocolManager._connect(wait, hold, route);
+    this.protocolManager.connect(wait, hold, route);
   }
 
   /**
@@ -621,7 +536,7 @@ export class Connection {
     wind?: number
   ): void {
     if (this.protocolManager instanceof Bosh) {
-      this.protocolManager._restore(jid, callback, wait, hold, wind);
+      this.protocolManager.restore(jid, callback, wait, hold, wind);
     } else {
       const stropheError = new Error('The "restore" method can only be used with a BOSH connection.');
       stropheError.name = 'StropheSessionError';
@@ -708,14 +623,14 @@ export class Connection {
     }
     if (Array.isArray(elem)) {
       for (const el of elem) {
-        this._queueData(el);
+        this.queueData(el);
       }
     } else if (!(elem instanceof Element)) {
-      this._queueData(elem.tree());
+      this.queueData(elem.tree());
     } else {
-      this._queueData(elem);
+      this.queueData(elem);
     }
-    this.protocolManager._send();
+    this.protocolManager.send();
   }
 
   /**
@@ -1053,49 +968,6 @@ export class Connection {
   }
 
   /**
-   *
-   * Register the SASL mechanisms which will be supported by this instance of
-   * Connection (i.e. which this XMPP client will support).
-   *
-   *  Parameters:
-   *
-   *    @param mechanisms - Array of objects with SASLMechanism prototypes
-   *
-   */
-  registerSASLMechanisms(mechanisms: SASLMechanism[]): void {
-    this.mechanisms = [];
-    mechanisms =
-      mechanisms ||
-      ([
-        SASLAnonymous,
-        SASLExternal,
-        SASLOAuthBearer,
-        SASLXOAuth2,
-        SASLPlain,
-        SASLSHA1,
-        SASLSHA256,
-        SASLSHA384,
-        SASLSHA512
-      ] as unknown as SASLMechanism[]);
-    // @ts-ignore
-    mechanisms.forEach((m) => this.registerSASLMechanism(m));
-  }
-
-  /**
-   *
-   * Register a single SASL mechanism, to be supported by this client.
-   *
-   *  Parameters:
-   *
-   *    @param mechanism - Constructor for an object with a SASLMechanism prototype
-   *
-   */
-  registerSASLMechanism<T extends SASLMechanism>(mechanism: new () => T): void {
-    const tmpMechanism = new mechanism();
-    this.mechanisms[tmpMechanism.mechname] = tmpMechanism;
-  }
-
-  /**
    *  Start the graceful disconnection process.
    *
    *  This function starts the disconnection process.  This process starts
@@ -1131,10 +1003,10 @@ export class Connection {
       // setup timeout handler
       this.disconnectTimeout = this._addSysTimedHandler(this.disconnection_timeout, this._onDisconnectTimeout.bind(this));
       // @ts-ignore
-      this.protocolManager._disconnect(pres);
+      this.protocolManager.disconnect(pres);
     } else {
       warn('Disconnect was called before Strophe connected to the server');
-      this.protocolManager._abortAllRequests();
+      this.protocolManager.abortAllRequests();
       this.doDisconnect();
     }
   }
@@ -1176,34 +1048,6 @@ export class Connection {
   }
 
   /**
-   *
-   *  Sorts an array of objects with prototype SASLMechanism according to
-   *  their priorities.
-   *
-   *  Parameters:
-   *
-   *    @param mechanisms - Array of SASL mechanisms.
-   *
-   */
-  sortMechanismsByPriority(mechanisms: SASLMechanism[]): SASLMechanism[] {
-    // Sorting mechanisms according to priority.
-    for (let i = 0; i < mechanisms.length - 1; ++i) {
-      let higher = i;
-      for (let j = i + 1; j < mechanisms.length; ++j) {
-        if (mechanisms[j].priority > mechanisms[higher].priority) {
-          higher = j;
-        }
-      }
-      if (higher !== i) {
-        const swap = mechanisms[i];
-        mechanisms[i] = mechanisms[higher];
-        mechanisms[higher] = swap;
-      }
-    }
-    return mechanisms;
-  }
-
-  /**
    * Set up authentication
    *
    *  Continues the initial connection request by setting up authentication
@@ -1218,66 +1062,9 @@ export class Connection {
    *
    */
   async authenticate(matched: SASLMechanism[]): Promise<void> {
-    if (!(await this.attemptSASLAuth(matched))) {
+    if (!(await this.sasl.attemptSASLAuth(matched))) {
       this.attemptLegacyAuth();
     }
-  }
-
-  /**
-   *
-   *  Iterate through an array of SASL mechanisms and attempt authentication
-   *  with the highest priority (enabled) mechanism.
-   *
-   *  Parameters:
-   *    (Array) mechanisms - Array of SASL mechanisms.
-   *
-   *  Returns:
-   *    (Boolean) mechanism_found - true or false, depending on whether a
-   *          valid SASL mechanism was found with which authentication could be
-   *          started.
-   */
-  async attemptSASLAuth(mechanisms: SASLMechanism[]): Promise<boolean> {
-    mechanisms = this.sortMechanismsByPriority(mechanisms || []);
-    let mechanism_found = false;
-    for (const mechanism of mechanisms) {
-      if (!mechanism.test(this)) {
-        continue;
-      }
-      this.saslSuccessHandler = this.addSysHandler((el) => this.saslSuccessCb(el), null, 'success', null, null);
-      this.saslFailureHandler = this.addSysHandler((el) => this.saslFailureCb(el), null, 'failure', null, null);
-      this.saslChallengeHandler = this.addSysHandlerPromise((el) => this.saslChallengeCb(el), null, 'challenge', null, null);
-
-      this.saslMechanism = mechanism;
-      this.saslMechanism.onStart(this);
-
-      const request_auth_exchange = $build('auth', {
-        xmlns: NS.SASL,
-        mechanism: this.saslMechanism.mechname
-      });
-      if (this.saslMechanism.isClientFirst) {
-        const response = await this.saslMechanism.clientChallenge(this);
-        request_auth_exchange.t(btoa(response));
-      }
-      this.send(request_auth_exchange.tree());
-      mechanism_found = true;
-      break;
-    }
-    return mechanism_found;
-  }
-
-  /**
-   *  _Private_ handler for the SASL challenge
-   *
-   */
-  async saslChallengeCb(elem: Element): Promise<boolean> {
-    const challenge = atob(getText(elem));
-    const response = await this.saslMechanism.onChallenge(this, challenge);
-    const stanza = $build('response', { xmlns: NS.SASL });
-    if (response !== '') {
-      stanza.t(btoa(response));
-    }
-    this.send(stanza.tree());
-    return true;
   }
 
   /**
@@ -1309,7 +1096,7 @@ export class Connection {
   }
 
   /**
-   *  _Private_ handler for legacy authentication.
+   *  handler for legacy authentication.
    *
    *  This handler is called in response to the initial <iq type='get'/>
    *  for legacy authentication.  It builds an authentication <iq/> and
@@ -1330,7 +1117,7 @@ export class Connection {
       .t(getNodeFromJid(this.jid))
       .up()
       .c('password')
-      .t(this.pass as string);
+      .t(this.sasl.pass as string);
 
     if (!getResourceFromJid(this.jid)) {
       // since the user has not supplied a resource, we pick
@@ -1342,109 +1129,6 @@ export class Connection {
 
     this.addSysHandler(this._auth2_cb.bind(this), null, null, null, '_auth_2');
     this.send(iq.tree());
-    return false;
-  }
-
-  /**
-   *  _Private_ handler for successful SASL authentication.
-   *
-   *  Parameters:
-   *    (XMLElement) elem - The matching stanza.
-   *
-   *  Returns:
-   *    false to remove the handler.
-   */
-  saslSuccessCb(elem: Element) {
-    if (this.saslData['server-signature']) {
-      let serverSignature;
-      const success = atob(getText(elem));
-      const attribMatch = /([a-z]+)=([^,]+)(,|$)/;
-      const matches = success.match(attribMatch);
-      if (matches[1] === 'v') {
-        serverSignature = matches[2];
-      }
-      if (serverSignature !== this.saslData['server-signature']) {
-        // remove old handlers
-        this.deleteHandler(this.saslFailureHandler);
-        this.saslFailureHandler = null;
-        if (this.saslChallengeHandler) {
-          this.deleteHandlerAsync(this.saslChallengeHandler);
-          this.saslChallengeHandler = null;
-        }
-        this.saslData = {};
-        return this.saslFailureCb(null);
-      }
-    }
-    info('SASL authentication succeeded.');
-
-    if (this.saslData.keys) {
-      this.scramKeys = this.saslData.keys;
-    }
-
-    if (this.saslMechanism) {
-      this.saslMechanism.onSuccess();
-    }
-    // remove old handlers
-    this.deleteHandler(this.saslFailureHandler);
-    this.saslFailureHandler = null;
-    if (this.saslChallengeHandler) {
-      this.deleteHandlerAsync(this.saslChallengeHandler);
-      this.saslChallengeHandler = null;
-    }
-    const streamfeature_handlers: Handler[] = [];
-    const wrapper = (handlers: Handler[], el: Element) => {
-      while (handlers.length) {
-        this.deleteHandler(handlers.pop());
-      }
-      this._onStreamFeaturesAfterSASL(el);
-      return false;
-    };
-    streamfeature_handlers.push(this.addSysHandler((el) => wrapper(streamfeature_handlers, el), null, 'stream:features', null, null));
-
-    streamfeature_handlers.push(this.addSysHandler((el) => wrapper(streamfeature_handlers, el), NS.STREAM, 'features', null, null));
-
-    // we must send a xmpp:restart now
-    this._sendRestart();
-    return false;
-  }
-
-  /**
-   *  Send an xmpp:restart stanza.
-   */
-  _sendRestart() {
-    this.data.push($build('restart').tree());
-    this.protocolManager._sendRestart();
-    // @ts-ignore
-    this.idleTimeout = setTimeout(() => this._onIdle(), 100);
-  }
-
-  /**
-   *  Parameters:
-   *    (XMLElement) elem - The matching stanza.
-   *
-   *  Returns:
-   *    false to remove the handler.
-   */
-  _onStreamFeaturesAfterSASL(elem: Element) {
-    // save stream:features for future usage
-    this.features = elem;
-    for (const child of Array.from(elem.childNodes)) {
-      if (child.nodeName === 'bind') {
-        this.do_bind = true;
-      }
-      if (child.nodeName === 'session') {
-        this.do_session = true;
-      }
-    }
-
-    if (!this.do_bind) {
-      this.changeConnectStatus(Status.AUTHFAIL, null);
-      return false;
-    } else if (!this.options.explicitResourceBinding) {
-      this.bind();
-    } else {
-      this.changeConnectStatus(Status.BINDREQUIRED, null);
-    }
     return false;
   }
 
@@ -1462,10 +1146,10 @@ export class Connection {
    *  advertises the "urn:ietf:params:xml:ns:xmpp-bind" stream feature.
    */
   bind(): void {
-    if (!this.do_bind) {
-      log(LogLevel.INFO, `Connection.prototype.bind called but "do_bind" is false`);
+    if (!this.sasl.doBind) {
       return;
     }
+
     this.addSysHandler(this._onResourceBindResultIQ.bind(this), null, null, null, '_bind_auth_2');
 
     const resource = getResourceFromJid(this.jid);
@@ -1503,7 +1187,7 @@ export class Connection {
       if (jidNode.length > 0) {
         this.authenticated = true;
         this.jid = getText(jidNode[0]);
-        if (this.do_session) {
+        if (this.sasl.doSession) {
           this._establishSession();
         } else {
           this.changeConnectStatus(Status.CONNECTED, null);
@@ -1526,7 +1210,7 @@ export class Connection {
    *  unnecessary and removed in RFC-6121.
    */
   _establishSession() {
-    if (!this.do_session) {
+    if (!this.sasl.doSession) {
       throw new Error(
         `Strophe.Connection.prototype._establishSession ` + `called but apparently ${NS.SESSION} wasn't advertised by the server`
       );
@@ -1564,33 +1248,6 @@ export class Connection {
       this.changeConnectStatus(Status.AUTHFAIL, null, elem);
       return false;
     }
-    return false;
-  }
-
-  /**
-   *  _Private_ handler for SASL authentication failure.
-   *
-   *  Parameters:
-   *    (XMLElement) elem - The matching stanza.
-   *
-   *  Returns:
-   *    false to remove the handler.
-   */
-  saslFailureCb(elem?: Element): boolean {
-    // delete unneeded handlers
-    if (this.saslSuccessHandler) {
-      this.deleteHandler(this.saslSuccessHandler);
-      this.saslSuccessHandler = null;
-    }
-    if (this.saslChallengeHandler) {
-      this.deleteHandlerAsync(this.saslChallengeHandler);
-      this.saslChallengeHandler = null;
-    }
-
-    if (this.saslMechanism) {
-      this.saslMechanism.onFailure();
-    }
-    this.changeConnectStatus(Status.AUTHFAIL, null, elem);
     return false;
   }
 
@@ -1647,7 +1304,7 @@ export class Connection {
   _onDisconnectTimeout(): false {
     debug('_onDisconnectTimeout was called');
     this.changeConnectStatus(Status.CONNTIMEOUT, null);
-    this.protocolManager._onDisconnectTimeout();
+    this.protocolManager.onDisconnectTimeout();
     // actually disconnect
     this.doDisconnect();
     return false;
@@ -1702,7 +1359,7 @@ export class Connection {
    *    @param req - The request that has data ready.
    */
   _dataRecv(req: Element): void {
-    const elem = this.protocolManager._reqToData(req as unknown as any);
+    const elem = this.protocolManager.reqToData(req as unknown as any);
     if (elem === null) {
       return;
     }
@@ -1730,7 +1387,7 @@ export class Connection {
     }
 
     // handle graceful disconnect
-    if (this.disconnecting && this.protocolManager._emptyQueue()) {
+    if (this.disconnecting && this.protocolManager.emptyQueue()) {
       this.doDisconnect();
       return;
     }
@@ -1865,7 +1522,7 @@ export class Connection {
     }
     this.timedHandlers = newList;
     clearTimeout(this.idleTimeout);
-    this.protocolManager._onIdle();
+    this.protocolManager.onIdle();
 
     // reactivate the timer only if connected
     if (this.connected) {
@@ -1897,7 +1554,7 @@ export class Connection {
 
     let bodyWrap: Element;
     try {
-      bodyWrap = this.protocolManager._reqToData(req as unknown as any);
+      bodyWrap = this.protocolManager.reqToData(req as unknown as any);
     } catch (e) {
       if (e.name !== ErrorCondition.BAD_FORMAT) {
         throw e;
@@ -1915,7 +1572,7 @@ export class Connection {
       this.xmlInput(bodyWrap);
     }
 
-    const conncheck = this.protocolManager._connect_cb(bodyWrap);
+    const conncheck = this.protocolManager.connectCb(bodyWrap);
     if (conncheck === Status.CONNFAIL) {
       return;
     }
@@ -1928,12 +1585,12 @@ export class Connection {
       hasFeatures = bodyWrap.getElementsByTagName('stream:features').length > 0 || bodyWrap.getElementsByTagName('features').length > 0;
     }
     if (!hasFeatures) {
-      this.protocolManager._no_auth_received(_callback);
+      this.protocolManager.noAuthReceived(_callback);
       return;
     }
 
     const matched = Array.from(bodyWrap.getElementsByTagName('mechanism'))
-      .map((m) => this.mechanisms[m.textContent])
+      .map((m) => this.sasl.mechanisms[m.textContent])
       .filter((m) => m);
 
     if (matched.length !== 0 && this.do_authentication !== false) {
@@ -1943,7 +1600,7 @@ export class Connection {
     if (bodyWrap.getElementsByTagName('auth').length === 0) {
       // There are no matching SASL mechanisms and also no legacy
       // auth available.
-      this.protocolManager._no_auth_received(_callback);
+      this.protocolManager.noAuthReceived(_callback);
     }
   }
 
@@ -2011,13 +1668,8 @@ export class Connection {
    *  fails to restore a previous auth'd session.
    *  @returns  {void}
    */
-  async login(jid = this.jid, password?: string, automatic = false): Promise<void> {
-    if (this.options?.worker && (await this.restoreWorkerSession())) {
-      return;
-    }
-    if (jid) {
-      jid = this.setUserJID(jid);
-    }
+  async login(jid: string, password?: string, automatic = false): Promise<void> {
+    this.setUserJID(jid);
 
     // See whether there is a BOSH session to re-attach to
     if (this.protocolManager instanceof Bosh && this.protocolManager.restoreBOSHSession()) {
@@ -2027,16 +1679,12 @@ export class Connection {
       return this.protocolManager.startNewPreboundBOSHSession();
     }
 
-    const fallBackPassword = typeof this.pass === 'string' ? this.pass : null;
-
-    password = password ?? fallBackPassword;
-    const credentials: Credentials = jid && password ? { jid, password } : null;
-    await this.attemptNonPreboundSession(credentials, automatic);
+    await this.attemptNewSession(this.authenticationMode, jid, password, automatic);
   }
 
   async loginNew(username: string, domain: string, service: string, password: string): Promise<void> {
     const separator = '@';
-    const safeUsername = username.indexOf(separator) > -1 ? username.split(separator)[0] : username;
+    const safeUsername = username.includes(separator) ? username.split(separator)[0] : username;
     const jid = safeUsername + separator + domain;
 
     const conn = await Connection.create(service, domain);
@@ -2045,7 +1693,12 @@ export class Connection {
     });
   }
 
-  createConnectionStatusHandler(username: string, domain: string, resolve: () => void, reject: (reason?: string) => void) {
+  createConnectionStatusHandler(
+    username: string,
+    domain: string,
+    resolve: () => void,
+    reject: (reason?: string) => void
+  ): (status: Status, value: string) => void {
     return (status: Status, value: string) => {
       log(LogLevel.INFO, `status update; status=${status}, value=${JSON.stringify(value)}`);
 
@@ -2053,10 +1706,8 @@ export class Connection {
         case Status.REDIRECT:
         case Status.ATTACHED:
         case Status.CONNECTING:
-        // @ts-ignore
-        case StropheStatusRegister.REGISTER:
-        // @ts-ignore
-        case StropheStatusRegister.REGISTERED:
+        case Status.REGISTER:
+        case Status.REGISTERED:
           break;
         case Status.AUTHENTICATING:
           break;
@@ -2064,16 +1715,21 @@ export class Connection {
           resolve();
           break;
         case Status.ERROR:
+          reject(`An error occurred connecting, failed with status code: ${status}`);
+          break;
         case Status.CONNFAIL:
+          reject(`The connection failed, failed with status code: ${status}`);
+          break;
         case Status.AUTHFAIL:
+          reject(`The authentication failed, failed with status code: ${status}`);
+          break;
         case Status.CONNTIMEOUT:
-        // @ts-ignore
-        case StropheStatusRegister.CONFLICT:
-        // @ts-ignore
-        case StropheStatusRegister.REGIFAIL:
-        // @ts-ignore
-        case StropheStatusRegister.NOTACCEPTABLE:
-          reject(`${errorMessages[status]}, failed with status code: ${status}`);
+          reject(`The connection timed out, failed with status code: ${status}`);
+          break;
+        case Status.CONFLICT:
+        case Status.REGIFAIL:
+        case Status.NOTACCEPTABLE:
+          reject(`Failed with status code: ${status}`);
           break;
         case Status.BINDREQUIRED:
           this.bind();
@@ -2092,8 +1748,7 @@ export class Connection {
   /**
    * Adds support for XEP-0156 by querying the XMPP server for alternate
    * connection methods. This allows users to use the websocket or BOSH
-   * connection of their own XMPP server instead of a proxy provided by the
-   * host of Converse.js.
+   * connection of their own XMPP server
    *
    * @param domain the xmpp server domain to requests the connection urls from
    */
@@ -2124,8 +1779,9 @@ export class Connection {
   }
 
   static onDomainDiscovered(xmlBody: string): { websocketUrl: string; boshServiceUrl: string } {
+    const discoNS = 'http://docs.oasis-open.org/ns/xri/xrd-1.0';
     const xrd = new window.DOMParser().parseFromString(xmlBody, 'text/xml').firstElementChild;
-    if (xrd.nodeName != 'XRD' || xrd.getAttribute('xmlns') != 'http://docs.oasis-open.org/ns/xri/xrd-1.0') {
+    if (xrd.nodeName != 'XRD' || xrd.getAttribute('xmlns') != discoNS) {
       log(LogLevel.WARN, 'Could not discover XEP-0156 connection methods');
       return null;
     }
@@ -2145,8 +1801,8 @@ export class Connection {
     return { websocketUrl, boshServiceUrl };
   }
 
-  private _queueData(element: Element): void {
-    if (element === null || !element.tagName || !element.childNodes) {
+  private queueData(element: Element): void {
+    if (!element || !element.tagName || !element.childNodes) {
       const stropheError = new Error('Cannot queue non-DOMElement.');
       stropheError.name = 'StropheError';
       throw stropheError;
@@ -2154,37 +1810,38 @@ export class Connection {
     this.data.push(element);
   }
 
-  restoreWorkerSession(): PromiseWrapper<unknown> {
-    // @ts-ignore
-    this.attach(this.onConnectStatusChanged.bind(this));
-    this.workerPromise = getOpenPromise();
-    return this.workerPromise;
-  }
-
-  async attemptNonPreboundSession(credentials?: Credentials, automatic = false): Promise<void> {
-    if (this.authenticationMode === AuthenticationMode.LOGIN) {
-      // XXX: If EITHER ``keepalive`` or ``auto_login`` is ``true`` and
-      // ``authentication`` is set to ``login``, then Converse will try to log the user in,
-      // since we don't have a way to distinguish between whether we're
-      // restoring a previous session (``keepalive``) or whether we're
-      // automatically setting up a new session (``auto_login``).
-      // So we can't do the check (!automatic || _converse.api.settings.get("auto_login")) here.
-      if (credentials) {
-        await this.connectNonPreboundSession(credentials);
-      } else if (this.credentialsUrl) {
-        // We give credentials_url preference, because
-        // _converse.connection.pass might be an expired token.
-        await this.connectNonPreboundSession(await this.getLoginCredentials(this.credentialsUrl));
-      } else if (this.jid && (this.password || (this as unknown as any).pass)) {
-        await this.connectNonPreboundSession();
-      } else if ('credentials' in navigator) {
-        await this.connectNonPreboundSession(await this.getLoginCredentialsFromBrowser());
-      } else {
-        log(LogLevel.WARN, "attemptNonPreboundSession: Couldn't find credentials to log in with");
-      }
-    } else if ([AuthenticationMode.ANONYMOUS, AuthenticationMode.EXTERNAL].includes(this.authenticationMode) && !automatic) {
-      await this.connectNonPreboundSession();
+  async attemptNewSession(mode: AuthenticationMode, jid: string, password: string, automatic = false): Promise<void> {
+    if ([AuthenticationMode.ANONYMOUS, AuthenticationMode.EXTERNAL].includes(mode) && !automatic) {
+      await this.connect(jid);
+      return;
     }
+
+    if (mode !== AuthenticationMode.LOGIN) {
+      throw new Error('Invalid mode for new session authentication; mode=' + mode);
+    }
+
+    if (!password) {
+      // We give credentials_url preference, because connection.pass might be an expired token.
+      const credentials = await this.getLoginCredentials(this.credentialsUrl);
+      password = credentials.password;
+      jid = credentials.jid ?? jid;
+    }
+
+    // XXX: If EITHER ``keepalive`` or ``auto_login`` is ``true`` and
+    // ``authentication`` is set to ``login``, then Converse will try to log the user in,
+    // since we don't have a way to distinguish between whether we're
+    // restoring a previous session (``keepalive``) or whether we're
+    // automatically setting up a new session (``auto_login``).
+    // So we can't do the check (!automatic || _converse.api.settings.get("auto_login")) here.
+    password = password ?? (this.sasl.pass as string) ?? this.password;
+
+    if (jid && password != null) {
+      await this.connect(jid, password);
+      return;
+    }
+
+    this.setDisconnectionCause(Status.AUTHFAIL, undefined, true);
+    this.disconnect('');
   }
 
   async getLoginCredentialsFromBrowser(): Promise<{ password: any; jid: string }> {
@@ -2211,6 +1868,10 @@ export class Connection {
   fetchLoginCredentialsInterceptor = async (xhr: XMLHttpRequest): Promise<XMLHttpRequest> => xhr;
 
   async getLoginCredentials(credentialsURL: string): Promise<Credentials> {
+    if (!credentialsURL && 'credentials' in navigator) {
+      return this.getLoginCredentialsFromBrowser();
+    }
+
     let credentials;
     let wait = 0;
     while (!credentials) {
@@ -2259,38 +1920,7 @@ export class Connection {
     );
   }
 
-  async connectNonPreboundSession(credentials?: Credentials, automaticLogin?: boolean) {
-    if ([AuthenticationMode.ANONYMOUS, AuthenticationMode.EXTERNAL].includes(this.authenticationMode)) {
-      if (!this.jid) {
-        throw new Error(
-          'Config Error: when using anonymous login ' +
-            "you need to provide the server's domain via the 'jid' option. " +
-            'Either when calling converse.initialize, or when calling ' +
-            '_converse.api.user.login.'
-        );
-      }
-      if (!this.reconnecting) {
-        this.reset();
-      }
-      await this.connect(this.jid.toLowerCase(), null);
-    } else if (this.authenticationMode === AuthenticationMode.LOGIN) {
-      const password = credentials ? credentials.password : (this as unknown as any).pass ?? this.password;
-      if (!password) {
-        if (automaticLogin) {
-          throw new Error('autoLogin: If you use auto_login and ' + "authentication='login' then you also need to provide a password.");
-        }
-        this.setDisconnectionCause(Status.AUTHFAIL, undefined, true);
-        this.disconnect('');
-        return;
-      }
-      if (!this.reconnecting) {
-        this.reset();
-      }
-      await this.connect(this.jid, password);
-    }
-  }
-
-  static generateResource() {
+  static generateResource(): string {
     return `/ngx-chat-${Math.floor(Math.random() * 139749528).toString()}`;
   }
 
@@ -2327,8 +1957,6 @@ export class Connection {
 
   async reconnect(): Promise<void> {
     log(LogLevel.DEBUG, 'RECONNECTING: the connection has dropped, attempting to reconnect.');
-    this.reconnecting = true;
-
     const isAuthenticationAnonymous = this.authenticationMode === AuthenticationMode.ANONYMOUS;
 
     if (this.connectionStatus.status === Status.CONNFAIL) {
@@ -2347,7 +1975,8 @@ export class Connection {
      */
     this.willReconnectSubject.next();
 
-    await this.login();
+    this.reset();
+    await this.login(this.jid);
   }
 
   async logOut(): Promise<void> {
@@ -2368,7 +1997,7 @@ export class Connection {
     let processed_features = false;
     let connect_cb_data: { req: Element } = { req: null };
 
-    if (username.indexOf('@') > -1) {
+    if (username.includes('@')) {
       log(LogLevel.WARN, 'username should not contain domain, only local part, this can lead to errors!');
     }
 
@@ -2398,11 +2027,11 @@ export class Connection {
       };
 
       // hooking strophe`s authenticate
-      const auth_old = async (matched: SASLMechanism[]): Promise<void> => conn.authenticate(matched);
+      const authOld = async (matched: SASLMechanism[]): Promise<void> => conn.authenticate(matched);
       conn.authenticate = async (matched: SASLMechanism[]): Promise<void> => {
         const isMatched = typeof matched !== 'undefined';
         if (isMatched) {
-          await auth_old(matched);
+          await authOld(matched);
           return;
         }
 
@@ -2410,10 +2039,7 @@ export class Connection {
           return;
         }
 
-        conn.jid = username + '@' + domain;
-        conn.authzid = getBareJidFromJid(conn.jid);
-        conn.authcid = getNodeFromJid(conn.jid);
-        conn.pass = password;
+        this.sasl.setVariables(username + '@' + domain, password);
 
         const req = connect_cb_data.req;
         conn._connect_cb(req, connect_callback);
@@ -2592,17 +2218,16 @@ export class Connection {
    * to reconnect.
    *
    */
-  async onDisconnected(automaticLogin?: boolean): Promise<void> {
+  async onDisconnected(disconnectionStatus: Status, disconnectionReason: string, automaticLogin?: boolean): Promise<void> {
     if (!automaticLogin) {
       await this.finishDisconnection();
       return;
     }
 
-    const reason = this.disconnectionReason;
-    const authFailed = this.disconnectionCause === Status.AUTHFAIL;
+    const authFailed = disconnectionStatus === Status.AUTHFAIL;
     if ((authFailed && this.credentialsUrl) || this.authenticationMode === AuthenticationMode.ANONYMOUS) {
       // If `credentials_url` is set, we reconnect, because we might
-      // be receiving expirable tokens from the credentials_url.
+      // be receiving expired tokens from the credentials_url.
       //
       // If `authentication` is anonymous, we reconnect because we
       // might have tried to attach with stale BOSH session tokens
@@ -2616,20 +2241,11 @@ export class Connection {
       return;
     }
 
-    if (this.connectionStatus.status === Status.CONNECTING) {
-      // Don't try to reconnect if we were never connected to begin
-      // with, otherwise an infinite loop can occur (e.g. when the
-      // BOSH service URL returns a 404).
-      this.setConnectionStatus(Status.CONNFAIL, 'An error occurred while connecting to the chat server.');
-      await this.finishDisconnection();
-      return;
-    }
-
     if (
-      this.disconnectionCause === Status.DISCONNECTING ||
-      reason === ErrorCondition.NO_AUTH_MECH ||
-      reason === 'host-unknown' ||
-      reason === 'remote-connection-failed'
+      disconnectionStatus === Status.DISCONNECTING ||
+      disconnectionReason === ErrorCondition.NO_AUTH_MECH ||
+      disconnectionReason === 'host-unknown' ||
+      disconnectionReason === 'remote-connection-failed'
     ) {
       await this.finishDisconnection();
       return;
@@ -2648,17 +2264,14 @@ export class Connection {
    * @param {string} message
    */
   async onConnectStatusChanged(status: Status, message: string): Promise<void> {
-    log(LogLevel.DEBUG, `Status changed to: ${this.CONNECTION_STATUS[status]}`);
     if (status === Status.ATTACHFAIL) {
       this.setConnectionStatus(status, message);
-      this.workerPromise?.resolve(false);
     } else if (status === Status.CONNECTED || status === Status.ATTACHED) {
-      if (this.workerPromise?.isResolved && this.connectionStatus.status === Status.ATTACHED) {
+      if (this.connectionStatus.status === Status.ATTACHED) {
         // A different tab must have attached, so nothing to do for us here.
         return;
       }
       this.setConnectionStatus(status, message);
-      this.workerPromise?.resolve(true);
 
       // By default, we always want to send out an initial presence stanza.
       this.sendInitialPresence = true;
@@ -2677,7 +2290,7 @@ export class Connection {
       }
     } else if (status === Status.DISCONNECTED) {
       this.setDisconnectionCause(status, message);
-      await this.onDisconnected();
+      await this.onDisconnected(status, message);
     } else if (status === Status.BINDREQUIRED) {
       this.bind();
     } else if (status === Status.ERROR) {
@@ -2692,7 +2305,7 @@ export class Connection {
       }
       this.setConnectionStatus(status, message);
       this.setDisconnectionCause(status, message, true);
-      await this.onDisconnected();
+      await this.onDisconnected(status, message);
     } else if (status === Status.CONNFAIL) {
       let feedback = message;
       if (message === 'host-unknown' || message == 'remote-connection-failed') {

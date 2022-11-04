@@ -151,7 +151,7 @@ export class StropheWebsocket implements ProtocolManager {
    *  Creates a WebSocket for a connection and assigns Callbacks to it.
    *  Does nothing if there already is a WebSocket.
    */
-  _connect() {
+  connect() {
     // Ensure that there is no open WebSocket from a previous Connection.
     this._closeSocket();
     this.socket = new WebSocket(this.connection.service, 'xmpp');
@@ -170,7 +170,7 @@ export class StropheWebsocket implements ProtocolManager {
    *  Parameters:
    *    (Strophe.Request) bodyWrap - The received stanza.
    */
-  _connect_cb(bodyWrap: Element): Status {
+  connectCb(bodyWrap: Element): Status {
     const stropheError = this._checkStreamError(bodyWrap, Status.CONNFAIL);
     if (stropheError) {
       return Status.CONNFAIL;
@@ -233,7 +233,7 @@ export class StropheWebsocket implements ProtocolManager {
       //_handleStreamSteart will check for XML errors and disconnect on error
       if (this._handleStreamStart(streamStart)) {
         //_connect_cb will check for stream:error and disconnect on error
-        this._connect_cb(streamStart);
+        this.connectCb(streamStart);
       }
     } else if (message.data.indexOf('<close ') === 0) {
       // <close xmlns="urn:ietf:params:xml:ns:xmpp-framing />
@@ -255,7 +255,7 @@ export class StropheWebsocket implements ProtocolManager {
           this.connection.changeConnectStatus(Status.REDIRECT, 'Received see-other-uri, resetting connection');
           this.connection.reset();
           this.connection.service = see_uri;
-          this._connect();
+          this.connect();
         }
       } else {
         this.connection.changeConnectStatus(Status.CONNFAIL, 'Received closing stream');
@@ -288,7 +288,7 @@ export class StropheWebsocket implements ProtocolManager {
    *  Parameters:
    *    (Request) pres - This stanza will be sent before disconnecting.
    */
-  _disconnect(pres?: Element) {
+  disconnect(pres?: Element) {
     if (this.socket && this.socket.readyState !== WebSocket.CLOSED) {
       if (pres) {
         this.connection.send(pres);
@@ -348,7 +348,7 @@ export class StropheWebsocket implements ProtocolManager {
    *  Returns:
    *    True, because WebSocket messages are send immediately after queueing.
    */
-  _emptyQueue() {
+  emptyQueue() {
     return true;
   }
 
@@ -377,7 +377,7 @@ export class StropheWebsocket implements ProtocolManager {
    * Called on stream start/restart when no stream:features
    * has been received.
    */
-  _no_auth_received(callback: () => void) {
+  noAuthReceived(callback: () => void) {
     error('Server did not offer a supported authentication mechanism');
     this.connection.changeConnectStatus(Status.CONNFAIL, ErrorCondition.NO_AUTH_MECH);
     if (callback) {
@@ -391,12 +391,12 @@ export class StropheWebsocket implements ProtocolManager {
    *
    *  This does nothing for WebSockets
    */
-  _onDisconnectTimeout() {}
+  onDisconnectTimeout() {}
 
   /** PrivateFunction: _abortAllRequests
    *  _Private_ helper function that makes sure all pending requests are aborted.
    */
-  _abortAllRequests() {}
+  abortAllRequests() {}
 
   /** PrivateFunction: _onError
    * _Private_ function to handle websockets errors.
@@ -407,7 +407,7 @@ export class StropheWebsocket implements ProtocolManager {
   _onError(webSocketError: Event) {
     error('Websocket error ' + JSON.stringify(webSocketError));
     this.connection.changeConnectStatus(Status.CONNFAIL, 'The WebSocket connection could not be established or was disconnected.');
-    this._disconnect();
+    this.disconnect();
   }
 
   /** PrivateFunction: _onIdle
@@ -415,7 +415,7 @@ export class StropheWebsocket implements ProtocolManager {
    *
    *  sends all queued stanzas
    */
-  _onIdle() {
+  onIdle() {
     const data = this.connection.data;
     if (data.length > 0 && !this.connection.paused) {
       for (const dataPart of data) {
@@ -518,7 +518,7 @@ export class StropheWebsocket implements ProtocolManager {
    *  Returns:
    *    The stanza that was passed.
    */
-  _reqToData(request: Request): Element {
+  reqToData(request: Request): Element {
     return request.xmlData;
   }
 
@@ -527,7 +527,7 @@ export class StropheWebsocket implements ProtocolManager {
    *
    * Just flushes the messages that are in the queue
    */
-  _send() {
+  send() {
     this.connection.flush();
   }
 
@@ -535,7 +535,7 @@ export class StropheWebsocket implements ProtocolManager {
    *
    *  Send an xmpp:restart stanza.
    */
-  _sendRestart() {
+  sendRestart() {
     clearTimeout(this.connection.idleTimeout);
     this.connection._onIdle.bind(this.connection)();
   }

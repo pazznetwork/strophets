@@ -15,7 +15,6 @@ export interface ProtocolManager {
   reset(): void;
 
   /**
-   * called by Strophe.Connection.connect
    *
    * @param wait - The optional HTTPBIND wait value.  This is the
    *      time the server will wait before returning an empty result for
@@ -25,73 +24,59 @@ export interface ProtocolManager {
    *      should almost always be set to 1 (the default).
    * @param route - The optional route value.
    */
-  _connect(wait?: number, hold?: number, route?: string): void;
+  connect(wait?: number, hold?: number, route?: string): void;
 
   /**
-   *  _Private_ function called by Strophe.Connection._connect_cb
    *
    * checks for stream:error
    *
    *  Parameters:
    *    (Strophe.Request) bodyWrap - The received stanza.
    */
-  _connect_cb(bodyWrap: Element): Status;
+  connectCb(bodyWrap: Element): Status;
 
   /**
-   *  _Private_ function called by Strophe.Connection.disconnect
-   *
    *  Disconnects and sends a last stanza if one is given
    *
    *  Parameters:
    *    (Request) pres - This stanza will be sent before disconnecting.
    */
-  _disconnect(pres?: Element): void;
+  disconnect(pres?: Element): void;
 
   /**
-   *  _Private_ function to disconnect.
-   *
    *  Just closes the Socket for WebSockets
    */
   doDisconnect(): void;
 
   /**
-   * _Private_ function to check if the message queue is empty.
-   *
    *  Returns:
    *    True, because WebSocket messages are send immediately after queueing.
    */
-  _emptyQueue(): boolean;
+  emptyQueue(): boolean;
 
   /**
-   *
-   * Called on stream start/restart when no stream:features
-   * has been received.
+   * Called on stream start/restart when no stream:features has been received.
    */
-  _no_auth_received(callback: () => void): void;
+  noAuthReceived(callback: () => void): void;
 
   /**
-   *  _Private_ timeout handler for handling non-graceful disconnection.
-   *
-   *  This does nothing for WebSockets
+   * Timeout handler for handling non-graceful disconnection. This does nothing for WebSockets
    */
-  _onDisconnectTimeout(): void;
+  onDisconnectTimeout(): void;
 
   /**
-   *  _Private_ helper function that makes sure all pending requests are aborted.
+   * makes sure all pending requests are aborted.
    */
-  _abortAllRequests(): void;
+  abortAllRequests(): void;
 
   /**
-   *  _Private_ function called by Strophe.Connection._onIdle
-   *
    *  sends all queued stanzas
    */
-  _onIdle(): void;
+  onIdle(): void;
 
   /**
-   * _Private_ function to get a stanza out of a request.
    *
-   * WebSockets don't use requests, so the passed argument is just returned.
+   * Get a stanza out of a request. WebSockets don't use requests, so the passed argument is just returned.
    *
    *  Parameters:
    *    (Object) stanza - The stanza.
@@ -99,18 +84,17 @@ export interface ProtocolManager {
    *  Returns:
    *    The stanza that was passed.
    */
-  _reqToData(request: Request): Element;
+  reqToData(request: Request): Element;
 
   /**
-   *  _Private_ part of the Connection.send function for WebSocket
+   *  Part of the Connection.send function for WebSocket
    *
    * Just flushes the messages that are in the queue
    */
-  _send(): void;
+  send(): void;
 
   /**
-   *
    *  Send an xmpp:restart stanza.
    */
-  _sendRestart(): void;
+  sendRestart(): void;
 }
