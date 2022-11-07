@@ -1566,7 +1566,6 @@ export class Connection {
   }
 
   async reconnect(): Promise<void> {
-    this.reconnecting = true;
     log(LogLevel.DEBUG, 'RECONNECTING: the connection has dropped, attempting to reconnect.');
     const isAuthenticationAnonymous = this.authenticationMode === AuthenticationMode.ANONYMOUS;
     const { status } = await firstValueFrom(this.connectionStatus$);
@@ -1753,38 +1752,6 @@ export class Connection {
     });
   }
 
-  /**
-   * Called as soon as a new connection has been established, either
-   * by logging in or by attaching to an existing BOSH session.
-   *
-   * @method Connection.onConnected
-   * @param {boolean} reconnecting - Whether we reconnected from an earlier dropped session.
-   */
-  onConnected(reconnecting: boolean): void {
-    this.flush(); // Solves problem of returned PubSub BOSH response not received by browser
-    this.setUserJID(this.jid);
-
-    /**
-     * Synchronous event triggered after we've sent an IQ to bind the
-     * user's JID resource for this session.
-     */
-    this.afterResourceBindingSubject.next();
-
-    if (reconnecting) {
-      /**
-       * After the connection has dropped and we have reconnected.
-       * Any Strophe stanza handlers will have to be registered anew.
-       */
-      this.reconnectedSubject.next();
-      this.reconnecting = false;
-    } else {
-      /**
-       * Triggered after the connection has been established
-       */
-      this.connectedSubject.next();
-    }
-  }
-
   finishDisconnection(): void {
     // Properly tear down the session so that it's possible to manually connect again.
     log(LogLevel.DEBUG, 'DISCONNECTED');
@@ -1841,6 +1808,7 @@ export class Connection {
    *
    * @param {number} status
    * @param {string} message
+   * @param {boolean} reconnecting
    */
   async onConnectStatusChanged(status: Status, message: string, reconnecting: boolean): Promise<void> {
     switch (status) {
@@ -1864,21 +1832,11 @@ export class Connection {
         break;
       case Status.DISCONNECTED:
       case Status.AUTHFAIL:
-        this.connectionStatusSubject.next({ status, message });
-        await this.onDisconnected(status, message);
+        await this.handleDisconnectedStatus(status, message);
         break;
       case Status.CONNECTED:
       case Status.ATTACHED:
-        this.connectionStatusSubject.next({ status, message });
-
-        const isConnected = status === Status.CONNECTED;
-        if (reconnecting) {
-          log(LogLevel.DEBUG, isConnected ? 'Reconnected' : 'Reattached');
-        } else {
-          log(LogLevel.DEBUG, isConnected ? 'Connected' : 'Attached');
-        }
-
-        this.onConnected(reconnecting);
+        this.handleConnectedStatus(status, message, reconnecting);
         break;
       case Status.BINDREQUIRED:
         this.bind();
@@ -1891,5 +1849,43 @@ export class Connection {
     delete this.bareJid;
     delete this.session;
     this.setProtocol();
+  }
+
+  private async handleDisconnectedStatus(status: Status.DISCONNECTED | Status.AUTHFAIL, message: string): Promise<void> {
+    this.connectionStatusSubject.next({ status, message });
+    await this.onDisconnected(status, message);
+  }
+
+  private handleConnectedStatus(status: Status.CONNECTED | Status.ATTACHED, message: string, reconnecting: boolean): void {
+    this.connectionStatusSubject.next({ status, message });
+
+    const isConnected = status === Status.CONNECTED;
+    if (reconnecting) {
+      log(LogLevel.DEBUG, isConnected ? 'Reconnected' : 'Reattached');
+    } else {
+      log(LogLevel.DEBUG, isConnected ? 'Connected' : 'Attached');
+    }
+
+    this.flush(); // Solves problem of returned PubSub BOSH response not received by browser
+    this.setUserJID(this.jid);
+
+    /**
+     * Synchronous event triggered after we've sent an IQ to bind the
+     * user's JID resource for this session.
+     */
+    this.afterResourceBindingSubject.next();
+
+    if (reconnecting) {
+      /**
+       * After the connection has dropped and we have reconnected.
+       * Any Strophe stanza handlers will have to be registered anew.
+       */
+      this.reconnectedSubject.next();
+    } else {
+      /**
+       * Triggered after the connection has been established
+       */
+      this.connectedSubject.next();
+    }
   }
 }
