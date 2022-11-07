@@ -20,15 +20,14 @@ export class Bosh implements ProtocolManager {
   hold = 1;
   wait = 60;
   limit = 5;
-  errors = 0;
   private inactivity: number;
 
   private lastResponseHeaders: string;
   private readonly _requests: any[];
 
   private destroySubject = new Subject<void>();
-  private readonly noResumeableBOSHSessionSubject = new Subject<void>();
-  noResumeableBOSHSession$ = this.noResumeableBOSHSessionSubject.asObservable();
+  private readonly notAbleToResumeBOSHSessionSubject = new Subject<void>();
+  notAbleToResumeBOSHSession$ = this.notAbleToResumeBOSHSessionSubject.asObservable();
 
   /**
    *  BOSH-Connections will have all stanzas wrapped in a <body> tag when
@@ -80,9 +79,8 @@ export class Bosh implements ProtocolManager {
   connect(wait?: number, hold?: number, route?: string) {
     this.wait |= wait;
     this.hold |= hold;
-    this.errors = 0;
 
-    const body = this._buildBody().attrs({
+    const body = this.buildBody().attrs({
       to: this.connection.domain,
       'xml:lang': 'en',
       wait: this.wait.toString(10),
@@ -114,16 +112,16 @@ export class Bosh implements ProtocolManager {
    *  Returns:
    *    A Builder with a <body/> element.
    */
-  _buildBody() {
+  buildBody() {
     const bodyWrap = $build('body', {
       rid: (this.rid++).toString(),
       xmlns: NS.HTTPBIND
     });
-    if (this.sid !== null) {
+    if (this.sid != null) {
       bodyWrap.attrs({ sid: this.sid });
     }
     if (this.connection.options.keepalive) {
-      this._cacheSession();
+      this.cacheSession();
     }
     return bodyWrap;
   }
@@ -136,7 +134,6 @@ export class Bosh implements ProtocolManager {
   reset() {
     this.rid = Math.floor(Math.random() * 4294967295);
     this.sid = null;
-    this.errors = 0;
     globalThis.sessionStorage.removeItem('strophe-bosh-session');
 
     this.connection.nextValidRid(this.rid);
@@ -170,16 +167,16 @@ export class Bosh implements ProtocolManager {
     jid: string,
     sid: string,
     rid: number,
-    callback: (status: number, condition: string, elem: Element) => unknown,
-    wait: number,
-    hold: number,
-    limit: number
+    callback: (status: number, condition: string) => unknown,
+    wait?: number,
+    hold?: number,
+    limit?: number
   ): void {
     this.connection.jid = jid;
     this.sid = sid;
     this.rid = rid;
 
-    this.connection.connect_callback = callback;
+    this.connection.connectCallback = callback;
     this.connection.domain = getDomainFromJid(this.connection.jid);
     this.connection.authenticated = true;
     this.connection.connected = true;
@@ -210,33 +207,22 @@ export class Bosh implements ProtocolManager {
    *    (Integer) limit - The optional HTTBIND window value.  This is the
    *      allowed range of request ids that are valid.  The default is 5.
    */
-  restore(
-    jid: string,
-    callback: (status: number, condition: string, elem: Element) => unknown,
-    wait?: number,
-    hold?: number,
-    limit?: number
-  ): void {
+  restore(jid: string, callback: (status: number, condition: string) => unknown, wait?: number, hold?: number, limit?: number): void {
     const session = JSON.parse(window.sessionStorage.getItem('strophe-bosh-session'));
     if (
-      typeof session !== 'undefined' &&
-      session !== null &&
+      session != null &&
       session.rid &&
       session.sid &&
       session.jid &&
-      (typeof jid === 'undefined' ||
-        jid === null ||
+      (jid == null ||
         getBareJidFromJid(session.jid) === getBareJidFromJid(jid) ||
         // If authcid is null, then it's an anonymous login, so
         // we compare only the domains:
-        (getNodeFromJid(jid) === null && getDomainFromJid(session.jid) === jid))
+        (getNodeFromJid(jid) == null && getDomainFromJid(session.jid) === jid))
     ) {
-      this.connection.restored = true;
       this.attach(session.jid, session.sid, session.rid, callback, wait, hold, limit);
     } else {
-      const namedError = new Error('_restore: no restoreable session.');
-      namedError.name = 'StropheSessionError';
-      throw namedError;
+      throw new Error('restore: no session that can be restored.');
     }
   }
 
@@ -247,7 +233,7 @@ export class Bosh implements ProtocolManager {
    *  Parameters:
    *    (Strophe.Request) bodyWrap - The received stanza.
    */
-  _cacheSession() {
+  cacheSession() {
     if (this.connection.authenticated) {
       if (this.connection.jid && this.rid && this.sid) {
         window.sessionStorage.setItem(
@@ -349,38 +335,6 @@ export class Bosh implements ProtocolManager {
   }
 
   /**
-   *  function to call error handlers registered for HTTP errors.
-   *
-   *  Parameters:
-   *    (Strophe.Request) req - The request that is changing readyState.
-   */
-  _callProtocolErrorHandlers(req: Request) {
-    const reqStatus = Bosh._getRequestStatus(req);
-    const err_callback = this.connection.protocolErrorHandlers.HTTP[reqStatus];
-    if (err_callback) {
-      err_callback.call(this, reqStatus);
-    }
-  }
-
-  /**
-   *  function to handle the error count.
-   *
-   *  Requests are resent automatically until their error count reaches
-   *  5.  Each time an error is encountered, this function is called to
-   *  increment the count and disconnect if the count is too high.
-   *
-   *  Parameters:
-   *    (Integer) reqStatus - The request status.
-   */
-  _hitError(reqStatus: number) {
-    this.errors++;
-    warn('request errored, status: ' + reqStatus + ', number of errors: ' + this.errors);
-    if (this.errors > 4) {
-      this.connection._onDisconnectTimeout();
-    }
-  }
-
-  /**
    * Called on stream start/restart when no stream:features
    * has been received and sends a blank poll request.
    */
@@ -391,7 +345,7 @@ export class Bosh implements ProtocolManager {
     } else {
       callback = this.connection._connect_cb.bind(this.connection);
     }
-    const body = this._buildBody();
+    const body = this.buildBody();
     this._requests.push(
       new Request(body.tree(), this._onRequestStateChange.bind(this, callback), Number.parseInt(body.tree().getAttribute('rid'), 10))
     );
@@ -437,7 +391,7 @@ export class Bosh implements ProtocolManager {
     }
 
     if (this._requests.length < 2 && data.length > 0) {
-      const body = this._buildBody();
+      const body = this.buildBody();
       for (const dataPart of data) {
         if (dataPart !== null && dataPart.tagName !== 'restart') {
           body.cnode(dataPart).up();
@@ -455,7 +409,7 @@ export class Bosh implements ProtocolManager {
       this._requests.push(
         new Request(
           body.tree(),
-          this._onRequestStateChange.bind(this, this.connection._dataRecv.bind(this.connection)),
+          this._onRequestStateChange.bind(this, this.connection.dataReceived.bind(this.connection)),
           Number.parseInt(body.tree().getAttribute('rid'), 10)
         )
       );
@@ -526,8 +480,7 @@ export class Bosh implements ProtocolManager {
     const reqStatus = Bosh._getRequestStatus(req);
     this.lastResponseHeaders = req.xhr.getAllResponseHeaders();
     if (this.connection.disconnecting && reqStatus >= 400) {
-      this._hitError(reqStatus);
-      this._callProtocolErrorHandlers(req);
+      // TODO: Check if hit error is necessary, error count for escalating error was 5
       return;
     }
 
@@ -554,12 +507,10 @@ export class Bosh implements ProtocolManager {
       this.connection.nextValidRid(Number(req.rid) + 1);
       debug('request id ' + req.id + '.' + req.sends + ' got 200');
       func(req); // call handler
-      this.errors = 0;
-    } else if (reqStatus === 0 || (reqStatus >= 400 && reqStatus < 600) || reqStatus >= 12000) {
+    } else if (reqStatus === 0 || (reqStatus >= 400 && reqStatus < 600)) {
       // request failed
       error('request id ' + req.id + '.' + req.sends + ' error ' + reqStatus + ' happened');
-      this._hitError(reqStatus);
-      this._callProtocolErrorHandlers(req);
+      // TODO: Check if hit error is necessary, error count for escalating error was 5
       if (reqStatus >= 400 && reqStatus < 500) {
         this.connection.changeConnectStatus(Status.DISCONNECTING, null);
         this.connection.doDisconnect();
@@ -590,7 +541,7 @@ export class Bosh implements ProtocolManager {
 
     // make sure we limit the number of retries
     if (req.sends > this.connection.maxRetries) {
-      this.connection._onDisconnectTimeout();
+      this.connection.onDisconnectTimeout();
       return;
     }
     const time_elapsed = req.age();
@@ -738,13 +689,13 @@ export class Bosh implements ProtocolManager {
    */
   _sendTerminate(pres: Element) {
     debug('_sendTerminate was called');
-    const body = this._buildBody().attrs({ type: 'terminate' });
+    const body = this.buildBody().attrs({ type: 'terminate' });
     if (pres) {
       body.cnode(pres);
     }
     const req = new Request(
       body.tree(),
-      this._onRequestStateChange.bind(this, this.connection._dataRecv.bind(this.connection)),
+      this._onRequestStateChange.bind(this, this.connection.dataReceived.bind(this.connection)),
       Number.parseInt(body.tree().getAttribute('rid'), 10)
     );
     this._requests.push(req);
@@ -799,10 +750,10 @@ export class Bosh implements ProtocolManager {
     }
   }
 
-  restoreBOSHSession(): boolean {
+  restoreBOSHSession(reconnecting: boolean): boolean {
     const jid = this.initBOSHSession();
     try {
-      this.restore(jid, async (status, condition) => this.connection.onConnectStatusChanged(status, condition));
+      this.restore(jid, async (status, condition) => this.connection.onConnectStatusChanged(status, condition, reconnecting));
       return true;
     } catch (e) {}
     return false;
@@ -815,7 +766,7 @@ export class Bosh implements ProtocolManager {
     return this.jid;
   }
 
-  startNewPreboundBOSHSession(): void {
+  startNewPreboundBOSHSession(reconnecting: boolean): void {
     const xhr = new XMLHttpRequest();
     xhr.open('GET', this.prebindUrl, true);
     xhr.setRequestHeader('Accept', 'application/json, text/javascript');
@@ -823,18 +774,24 @@ export class Bosh implements ProtocolManager {
       if (xhr.status >= 200 && xhr.status < 400) {
         const data = JSON.parse(xhr.responseText);
         const jid = this.connection.setUserJID(data.jid);
-        (this.connection as Connection).attach(jid, data.sid, data.rid, this.connection.onConnectStatusChanged.bind(this), 59);
+        this.attach(
+          jid,
+          data.sid,
+          data.rid,
+          (status, condition) => this.connection.onConnectStatusChanged(status, condition, reconnecting),
+          59
+        );
       } else {
         xhr.onerror(null);
       }
     };
     xhr.onerror = () => {
-      this.connection.killSessionBosh();
+      this.connection.clearSession();
       this.destroySubject.next();
       /**
        * Triggered when fetching prebind tokens failed
        */
-      this.noResumeableBOSHSessionSubject.next();
+      this.notAbleToResumeBOSHSessionSubject.next();
     };
     xhr.send();
   }

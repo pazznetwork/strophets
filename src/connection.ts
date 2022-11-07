@@ -1,5 +1,4 @@
 import { SASLMechanism } from './sasl-mechanism';
-import { Handler } from './handler';
 import { TimedHandler } from './timed-handler';
 import { Status } from './status';
 import { Builder } from './builder';
@@ -17,8 +16,8 @@ import { Matcher, MatcherConfig } from './matcher';
 import { ConnectionOptions } from './connection-options';
 import { AuthenticationMode } from './authentication-mode';
 import { Credentials } from './credentials';
-import { HandlerAsync } from './handlerAsync';
 import { Sasl } from './sasl';
+import { HandlerService } from './handler-service';
 
 /**
  *  XMPP Connection manager.
@@ -64,26 +63,11 @@ export class Connection {
   domain: string = null;
   features: Element;
 
-  // handler lists
-  timedHandlers: TimedHandler[];
-  handlers: Handler[];
-  removeTimeds: TimedHandler[];
-  removeHandlers: Handler[];
-  removeHandlersAsync: HandlerAsync[];
-  addTimeds: TimedHandler[];
-  addHandlers: Handler[];
-  addHandlersAsync: HandlerAsync[];
-  protocolErrorHandlers: {
-    HTTP: Record<number, (status: number) => unknown>;
-    websocket: Record<number, (status: number) => unknown>;
-  };
-
   authenticated: boolean;
   connected: boolean;
   disconnecting: boolean;
   do_authentication: boolean;
   paused: boolean;
-  restored: boolean;
 
   maxRetries: number;
 
@@ -93,7 +77,7 @@ export class Connection {
    *  Set on connection.
    *  Callback after connecting.
    */
-  connect_callback: (status: number, condition: string, elem: Element) => unknown;
+  connectCallback: (status: number, condition: string, elem: Element) => unknown;
 
   disconnection_timeout: number;
 
@@ -112,15 +96,12 @@ export class Connection {
 
   private reconnecting = false;
 
-  private connectionStatus: { status: Status; message: string };
+  private readonly connectionStatusSubject = new Subject<{ status: Status; message: string }>();
+  readonly connectionStatus$ = this.connectionStatusSubject.asObservable();
 
   private session: Record<string, unknown>;
   private bareJid: string;
   private domainJid: string;
-
-  private disconnectionCause: Status;
-  private disconnectionReason: string;
-  private sendInitialPresence: boolean;
 
   /**
    * protocol used for connection
@@ -132,9 +113,9 @@ export class Connection {
   data: Element[];
   private uniqueId: number;
 
-  private iqFallbackHandler: Handler;
-
   readonly sasl = new Sasl(this);
+
+  readonly handlerService = new HandlerService(this);
 
   get handlePreBind(): boolean {
     return this.authenticationMode === AuthenticationMode.PREBIND && !!this.prebindUrl;
@@ -183,8 +164,8 @@ export class Connection {
    */
   private constructor(
     public service: string,
-    readonly options?: ConnectionOptions,
-    readonly authenticationMode?: AuthenticationMode,
+    readonly options: ConnectionOptions,
+    readonly authenticationMode: AuthenticationMode,
     readonly prebindUrl?: string,
     readonly boshServiceUrl?: string,
     readonly websocketUrl?: string,
@@ -195,18 +176,6 @@ export class Connection {
     /* stream:features */
     this.features = null;
 
-    // handler lists
-    this.timedHandlers = [];
-    this.handlers = [];
-    this.removeTimeds = [];
-    this.removeHandlers = [];
-    this.addTimeds = [];
-    this.addHandlers = [];
-    this.protocolErrorHandlers = {
-      HTTP: {},
-      websocket: {}
-    };
-
     this.idleTimeout = null;
     this.disconnectTimeout = null;
 
@@ -215,7 +184,6 @@ export class Connection {
     this.disconnecting = false;
     this.do_authentication = true;
     this.paused = false;
-    this.restored = false;
 
     this.data = [];
     this.uniqueId = 0;
@@ -228,25 +196,6 @@ export class Connection {
     this.idleTimeout = setTimeout(() => this._onIdle(), 100);
 
     addCookies(this.options.cookies);
-
-    // A client must always respond to incoming IQ "set" and "get" stanzas.
-    // See https://datatracker.ietf.org/doc/html/rfc6120#section-8.2.3
-    //
-    // This is a fallback handler which gets called when no other handler
-    // was called for a received IQ "set" or "get".
-    this.iqFallbackHandler = new Handler(
-      (iq) => {
-        this.send(
-          $iq({ type: 'error', id: iq.getAttribute('id') })
-            .c('error', { type: 'cancel' })
-            .c('service-unavailable', { xmlns: NS.STANZAS })
-        );
-        return false;
-      },
-      null,
-      'iq',
-      ['get', 'set']
-    );
 
     // initialize plugins
     for (const [key, value] of connectionPlugins.entries()) {
@@ -281,18 +230,11 @@ export class Connection {
     this.sasl.doSession = false;
     this.sasl.doBind = false;
 
-    // handler lists
-    this.timedHandlers = [];
-    this.handlers = [];
-    this.removeTimeds = [];
-    this.removeHandlers = [];
-    this.addTimeds = [];
-    this.addHandlers = [];
+    this.handlerService.resetHandlers();
 
     this.authenticated = false;
     this.connected = false;
     this.disconnecting = false;
-    this.restored = false;
 
     this.data = [];
     this.uniqueId = 0;
@@ -357,33 +299,6 @@ export class Connection {
   }
 
   /**
-   *  Register a handler function for when a protocol (websocker or HTTP)
-   *  error occurs.
-   *
-   *  NOTE: Currently only HTTP errors for BOSH requests are handled.
-   *  Patches that handle websocket errors would be very welcome.
-   *
-   *  Parameters:
-   *
-   *    @param protocol - 'HTTP' or 'websocket'
-   *    @param status_code - Error status code (e.g 500, 400 or 404)
-   *    @param callback - Function that will fire on Http error
-   *
-   *  Example:
-   *  function onError(err_code){
-   *    //do stuff
-   *  }
-   *
-   *  let conn = connect('http://example.com/http-bind');
-   *  conn.addProtocolErrorHandler('HTTP', 500, onError);
-   *  // Triggers HTTP 500 error and onError handler will be called
-   *  conn.connect('user_jid@incorrect_jabber_host', 'secret', onConnect);
-   */
-  addProtocolErrorHandler(protocol: string, status_code: number, callback: (status: number) => unknown): void {
-    this.protocolErrorHandlers[protocol][status_code] = callback;
-  }
-
-  /**
    *  Starts the connection process.
    *
    *  As the connection process proceeds, the user supplied callback will
@@ -443,11 +358,10 @@ export class Connection {
 
     this.sasl.setVariables(this.jid, pass, authcid);
 
-    this.connect_callback = callback;
+    this.connectCallback = callback;
     this.disconnecting = false;
     this.connected = false;
     this.authenticated = false;
-    this.restored = false;
     this.disconnection_timeout = disconnection_timeout;
 
     // parse jid for domain
@@ -493,9 +407,9 @@ export class Connection {
     wind?: number
   ): void {
     // @ts-ignore
-    if (this.protocolManager._attach) {
+    if (this.protocolManager.attach) {
       // @ts-ignore
-      return this.protocolManager._attach(jid, sid, rid, callback, wait, hold, wind);
+      return this.protocolManager.attach(jid, sid, rid, callback, wait, hold, wind);
     } else {
       const stropheError = new Error('The "attach" method is not available for your connection protocol');
       stropheError.name = 'StropheSessionError';
@@ -528,13 +442,7 @@ export class Connection {
    *    @param [wind=5] wind - The optional HTTBIND window value.
    *      This is the allowed range of request ids that are valid.
    */
-  restore(
-    jid?: string,
-    callback?: (status: Status, condition: string, elem: Element) => unknown,
-    wait?: number,
-    hold?: number,
-    wind?: number
-  ): void {
+  restore(jid?: string, callback?: (status: Status, condition: string) => unknown, wait?: number, hold?: number, wind?: number): void {
     if (this.protocolManager instanceof Bosh) {
       this.protocolManager.restore(jid, callback, wait, hold, wind);
     } else {
@@ -682,11 +590,11 @@ export class Connection {
     }
 
     if (typeof callback === 'function' || typeof errback === 'function') {
-      const handler = this.addHandler(
+      const handler = this.handlerService.addHandler(
         (stanza) => {
           // remove timeout handler if there is one
           if (timeoutHandler) {
-            this.deleteTimedHandler(timeoutHandler);
+            this.handlerService.deleteTimedHandler(timeoutHandler);
           }
           if (stanza.getAttribute('type') === 'error') {
             if (errback) {
@@ -705,9 +613,9 @@ export class Connection {
 
       // if timeout specified, set up a timeout handler.
       if (timeout) {
-        timeoutHandler = this.addTimedHandler(timeout, () => {
+        timeoutHandler = this.handlerService.addTimedHandler(timeout, () => {
           // get rid of normal handler
-          this.deleteHandler(handler);
+          this.handlerService.deleteHandler(handler);
           // call errback on timeout with null stanza
           if (errback) {
             errback(null);
@@ -736,7 +644,6 @@ export class Connection {
    *    @returns The id used to send the IQ.
    */
   sendIQ(el: Element | Builder, callback?: (stanza: Element) => unknown, errback?: (stanza: Element) => unknown, timeout?: number): string {
-    let timeoutHandler: TimedHandler = null;
     const elem = el instanceof Element ? el : el.tree();
 
     let id = elem.getAttribute('id');
@@ -746,12 +653,13 @@ export class Connection {
       elem.setAttribute('id', id);
     }
 
+    let timeoutHandler: TimedHandler = null;
     if (typeof callback === 'function' || typeof errback === 'function') {
-      const handler = this.addHandler(
+      const handler = this.handlerService.addHandler(
         (stanza) => {
           // remove timeout handler if there is one
           if (timeoutHandler) {
-            this.deleteTimedHandler(timeoutHandler);
+            this.handlerService.deleteTimedHandler(timeoutHandler);
           }
           const iqtype = stanza.getAttribute('type');
           if (iqtype === 'result') {
@@ -777,9 +685,9 @@ export class Connection {
 
       // if timeout specified, set up a timeout handler.
       if (timeout) {
-        timeoutHandler = this.addTimedHandler(timeout, () => {
+        timeoutHandler = this.handlerService.addTimedHandler(timeout, () => {
           // get rid of normal handler
-          this.deleteHandler(handler);
+          this.handlerService.deleteHandler(handler);
           // call errback on timeout with null stanza
           if (errback) {
             errback(null);
@@ -790,177 +698,6 @@ export class Connection {
     }
     this.send(elem);
     return id;
-  }
-
-  /**
-   *  Add a timed handler to the connection.
-   *
-   *  This function adds a timed handler.  The provided handler will
-   *  be called every period milliseconds until it returns false,
-   *  the connection is terminated, or the handler is removed.  Handlers
-   *  that wish to continue being invoked should return true.
-   *
-   *  Because of method binding it is necessary to save the result of
-   *  this function if you wish to remove a handler with
-   *  deleteTimedHandler().
-   *
-   *  Note that user handlers are not active until authentication is
-   *  successful.
-   *
-   *  Parameters:
-   *
-   *    @param period - The period of the handler.
-   *    @param handler - The callback function.
-   *
-   *  Returns:
-   *    @returns A reference to the handler that can be used to remove it.
-   */
-  addTimedHandler(period: number, handler: () => boolean): TimedHandler {
-    const thand = new TimedHandler(period, handler);
-    this.addTimeds.push(thand);
-    return thand;
-  }
-
-  /**
-   *  Delete a timed handler for a connection.
-   *
-   *  This function removes a timed handler from the connection.  The
-   *  handRef parameter is *not* the function passed to addTimedHandler(),
-   *  but is the reference returned from addTimedHandler().
-   *
-   *  Parameters:
-   *
-   *    @param handRef - The handler reference.
-   */
-  deleteTimedHandler(handRef: TimedHandler): void {
-    // this must be done in the Idle loop so that we don't change
-    // the handlers during iteration
-    this.removeTimeds.push(handRef);
-  }
-
-  /**
-   *  Add a stanza handler for the connection.
-   *
-   *  This function adds a stanza handler to the connection.  The
-   *  handler callback will be called for any stanza that matches
-   *  the parameters.  Note that if multiple parameters are supplied,
-   *  they must all match for the handler to be invoked.
-   *
-   *  The handler will receive the stanza that triggered it as its argument.
-   *  *The handler should return true if it is to be invoked again;
-   *  returning false will remove the handler after it returns.*
-   *
-   *  As a convenience, the ns parameters applies to the top level element
-   *  and also any of its immediate children.  This is primarily to make
-   *  matching /iq/query elements easy.
-   *
-   *  Options
-   *  ~~~~~~~
-   *  With the options argument, you can specify boolean flags that affect how
-   *  matches are being done.
-   *
-   *  Currently two flags exist:
-   *
-   *  - matchBareFromJid:
-   *      When set to true, the from parameter and the
-   *      from attribute on the stanza will be matched as bare JIDs instead
-   *      of full JIDs. To use this, pass {matchBareFromJid: true} as the
-   *      value of options. The default value for matchBareFromJid is false.
-   *
-   *  - ignoreNamespaceFragment:
-   *      When set to true, a fragment specified on the stanza's namespace
-   *      URL will be ignored when it's matched with the one configured for
-   *      the handler.
-   *
-   *      This means that if you register like this:
-   *      >   connection.addHandler(
-   *      >       handler,
-   *      >       'http://jabber.org/protocol/muc',
-   *      >       null, null, null, null,
-   *      >       {'ignoreNamespaceFragment': true}
-   *      >   );
-   *
-   *      Then a stanza with XML namespace of
-   *      'http://jabber.org/protocol/muc#user' will also be matched. If
-   *      'ignoreNamespaceFragment' is false, then only stanzas with
-   *      'http://jabber.org/protocol/muc' will be matched.
-   *
-   *  Deleting the handler
-   *  ~~~~~~~~~~~~~~~~~~~~
-   *  The return value should be saved if you wish to remove the handler
-   *  with deleteHandler().
-   *
-   *  Parameters:
-   *
-   *    @param handler - The user callback.
-   *    @param ns - The namespace to match.
-   *    @param name - The stanza tag name to match.
-   *    @param type - The stanza type (or types if an array) to match.
-   *    @param id - The stanza id attribute to match.
-   *    @param from - The stanza from attribute to match.
-   *    @param options - The handler options
-   *
-   *  Returns:
-   *    @returns A reference to the handler that can be used to remove it.
-   */
-  addHandler(
-    handler: (stanza: Element) => boolean,
-    ns?: string,
-    name?: string,
-    type?: string | string[],
-    id?: string,
-    from?: string,
-    options?: { matchBareFromJid: boolean; ignoreNamespaceFragment: boolean }
-  ): Handler {
-    const hand = new Handler(handler, ns, name, type, id, from, options);
-    this.addHandlers.push(hand);
-    return hand;
-  }
-
-  /**
-   *  Delete a stanza handler for a connection.
-   *
-   *  This function removes a stanza handler from the connection.  The
-   *  handRef parameter is *not* the function passed to addHandler(),
-   *  but is the reference returned from addHandler().
-   *
-   *  Parameters:
-   *
-   *    @param handRef - The handler reference.
-   */
-  deleteHandler(handRef: Handler): void {
-    // this must be done in the Idle loop so that we don't change
-    // the handlers during iteration
-    this.removeHandlers.push(handRef);
-    // If a handler is being deleted while it is being added,
-    // prevent it from getting added
-    const i = this.addHandlers.indexOf(handRef);
-    if (i >= 0) {
-      this.addHandlers.splice(i, 1);
-    }
-  }
-
-  /**
-   *  Delete a stanza handler for a connection.
-   *
-   *  This function removes a stanza handler from the connection.  The
-   *  handRef parameter is *not* the function passed to addHandler(),
-   *  but is the reference returned from addHandler().
-   *
-   *  Parameters:
-   *
-   *    @param handRef - The handler reference.
-   */
-  deleteHandlerAsync(handRef: HandlerAsync): void {
-    // this must be done in the Idle loop so that we don't change
-    // the handlers during iteration
-    this.removeHandlersAsync.push(handRef);
-    // If a handler is being deleted while it is being added,
-    // prevent it from getting added
-    const i = this.addHandlersAsync.indexOf(handRef);
-    if (i >= 0) {
-      this.addHandlersAsync.splice(i, 1);
-    }
   }
 
   observeForMatch$(options?: MatcherConfig): Observable<Element> {
@@ -1001,7 +738,7 @@ export class Connection {
         });
       }
       // setup timeout handler
-      this.disconnectTimeout = this._addSysTimedHandler(this.disconnection_timeout, this._onDisconnectTimeout.bind(this));
+      this.disconnectTimeout = this.handlerService.addSysTimedHandler(this.disconnection_timeout, () => this.onDisconnectTimeout());
       // @ts-ignore
       this.protocolManager.disconnect(pres);
     } else {
@@ -1023,7 +760,7 @@ export class Connection {
 
     // Cancel Disconnect Timeout
     if (this.disconnectTimeout !== null) {
-      this.deleteTimedHandler(this.disconnectTimeout);
+      this.handlerService.deleteTimedHandler(this.disconnectTimeout);
       this.disconnectTimeout = null;
     }
 
@@ -1032,15 +769,9 @@ export class Connection {
 
     this.authenticated = false;
     this.disconnecting = false;
-    this.restored = false;
 
     // delete handlers
-    this.handlers = [];
-    this.timedHandlers = [];
-    this.removeTimeds = [];
-    this.removeHandlers = [];
-    this.addTimeds = [];
-    this.addHandlers = [];
+    this.handlerService.resetHandlers();
 
     // tell the parent we disconnected
     this.changeConnectStatus(Status.DISCONNECTED, reason);
@@ -1080,7 +811,7 @@ export class Connection {
     } else {
       // Fall back to legacy authentication
       this.changeConnectStatus(Status.AUTHENTICATING, null);
-      this.addSysHandler(this._onLegacyAuthIQResult.bind(this), null, null, null, '_auth_1');
+      this.handlerService.addSysHandler((elem) => this._onLegacyAuthIQResult(elem), null, null, null, '_auth_1');
       this.send(
         $iq({
           type: 'get',
@@ -1127,7 +858,7 @@ export class Connection {
     }
     iq.up().c('resource', {}).t(getResourceFromJid(this.jid));
 
-    this.addSysHandler(this._auth2_cb.bind(this), null, null, null, '_auth_2');
+    this.handlerService.addSysHandler((element) => this._auth2_cb(element), null, null, null, '_auth_2');
     this.send(iq.tree());
     return false;
   }
@@ -1150,7 +881,7 @@ export class Connection {
       return;
     }
 
-    this.addSysHandler(this._onResourceBindResultIQ.bind(this), null, null, null, '_bind_auth_2');
+    this.handlerService.addSysHandler((element) => this._onResourceBindResultIQ(element), null, null, null, '_bind_auth_2');
 
     const resource = getResourceFromJid(this.jid);
     if (resource) {
@@ -1215,7 +946,7 @@ export class Connection {
         `Strophe.Connection.prototype._establishSession ` + `called but apparently ${NS.SESSION} wasn't advertised by the server`
       );
     }
-    this.addSysHandler(this._onSessionResultIQ.bind(this), null, null, null, '_session_auth_2');
+    this.handlerService.addSysHandler((element) => this._onSessionResultIQ(element), null, null, null, '_session_auth_2');
 
     this.send($iq({ type: 'set', id: '_session_auth_2' }).c('session', { xmlns: NS.SESSION }).tree());
   }
@@ -1275,25 +1006,7 @@ export class Connection {
   }
 
   /**
-   *  _Private_ function to add a system level timed handler.
-   *
-   *  This function is used to add a Strophe.TimedHandler for the
-   *  library code.  System timed handlers are allowed to run before
-   *  authentication is complete.
-   *
-   *  Parameters:
-   *    (Integer) period - The period of the handler.
-   *    (Function) handler - The callback function.
-   */
-  _addSysTimedHandler(period: number, handler: () => boolean) {
-    const thand = new TimedHandler(period, handler);
-    thand.user = false;
-    this.addTimeds.push(thand);
-    return thand;
-  }
-
-  /**
-   *  _Private_ timeout handler for handling non-graceful disconnection.
+   *  timeout handler for handling non-graceful disconnection.
    *
    *  If the graceful disconnect process does not complete within the
    *  time allotted, this handler finishes the disconnect anyway.
@@ -1301,7 +1014,7 @@ export class Connection {
    *  Returns:
    *    false to remove the handler.
    */
-  _onDisconnectTimeout(): false {
+  onDisconnectTimeout(): false {
     debug('_onDisconnectTimeout was called');
     this.changeConnectStatus(Status.CONNTIMEOUT, null);
     this.protocolManager.onDisconnectTimeout();
@@ -1336,9 +1049,9 @@ export class Connection {
       }
     }
     // notify the user's callback
-    if (this.connect_callback) {
+    if (this.connectCallback) {
       try {
-        this.connect_callback(status, condition, elem);
+        this.connectCallback(status, condition, elem);
       } catch (e) {
         handleError(e);
         log(LogLevel.ERROR, `User connection callback caused an exception: ${e}`);
@@ -1347,7 +1060,7 @@ export class Connection {
   }
 
   /**
-   *  _Private_ handler to processes incoming data from the connection.
+   *  handler to processes incoming data from the connection.
    *
    *  Except for _connect_cb handling the initial connection request,
    *  this function handles the incoming data for all requests.  This
@@ -1358,7 +1071,7 @@ export class Connection {
    *
    *    @param req - The request that has data ready.
    */
-  _dataRecv(req: Element): void {
+  dataReceived(req: Element): void {
     const elem = this.protocolManager.reqToData(req as unknown as any);
     if (elem === null) {
       return;
@@ -1372,19 +1085,8 @@ export class Connection {
       this.stanzasInSubject.next(elem);
     }
 
-    // remove handlers scheduled for deletion
-    while (this.removeHandlers.length > 0) {
-      const hand = this.removeHandlers.pop();
-      const i = this.handlers.indexOf(hand);
-      if (i >= 0) {
-        this.handlers.splice(i, 1);
-      }
-    }
-
-    // add handlers scheduled for addition
-    while (this.addHandlers.length > 0) {
-      this.handlers.push(this.addHandlers.pop());
-    }
+    this.handlerService.removeScheduledHandlers();
+    this.handlerService.addScheduledHandlers();
 
     // handle graceful disconnect
     if (this.disconnecting && this.protocolManager.emptyQueue()) {
@@ -1415,71 +1117,8 @@ export class Connection {
 
     // send each incoming stanza through the handler chain
     forEachChild(elem, null, (child) => {
-      const matches = [];
-      this.handlers = this.handlers.reduce((handlers, handler) => {
-        try {
-          if (handler.isMatch(child) && (this.authenticated || !handler.user)) {
-            if (handler.run(child)) {
-              handlers.push(handler);
-            }
-            matches.push(handler);
-          } else {
-            handlers.push(handler);
-          }
-        } catch (e) {
-          // if the handler throws an exception, we consider it as false
-          warn('Removing Strophe handlers due to uncaught exception: ' + e.message);
-        }
-
-        return handlers;
-      }, []);
-
-      // If no handler was fired for an incoming IQ with type="set",
-      // then we return an IQ error stanza with service-unavailable.
-      if (!matches.length && this.iqFallbackHandler.isMatch(child)) {
-        this.iqFallbackHandler.run(child);
-      }
+      this.handlerService.checkHandlerChain(this.authenticated, child);
     });
-  }
-
-  /**
-   *  This function is used to add a Handler for the
-   *  library code.  System stanza handlers are allowed to run before
-   *  authentication is complete.
-   *
-   *  Parameters:
-   *
-   *    @param {(element: Element) => boolean} handler - The callback function.
-   *    @param {string} ns - The namespace to match.
-   *    @param {string} name - The stanza name to match.
-   *    @param {string} type - The stanza type attribute to match.
-   *    @param {string} id - The stanza id attribute to match.
-   */
-  addSysHandler(handler: (element: Element) => boolean, ns: string, name: string, type: string, id: string): Handler {
-    const hand = new Handler(handler, ns, name, type, id);
-    hand.user = false;
-    this.addHandlers.push(hand);
-    return hand;
-  }
-
-  /**
-   *  This function is used to add a Handler for the
-   *  library code.  System stanza handlers are allowed to run before
-   *  authentication is complete.
-   *
-   *  Parameters:
-   *
-   *    @param {(element: Element) => boolean} handler - The callback function.
-   *    @param {string} ns - The namespace to match.
-   *    @param {string} name - The stanza name to match.
-   *    @param {string} type - The stanza type attribute to match.
-   *    @param {string} id - The stanza id attribute to match.
-   */
-  addSysHandlerPromise(handler: (element: Element) => Promise<boolean>, ns: string, name: string, type: string, id: string): HandlerAsync {
-    const hand = new HandlerAsync(handler, ns, name, type, id);
-    hand.user = false;
-    this.addHandlersAsync.push(hand);
-    return hand;
   }
 
   /**
@@ -1489,38 +1128,10 @@ export class Connection {
    *  are ready and keep poll requests going.
    */
   _onIdle(): void {
-    // add timed handlers scheduled for addition
-    // NOTE: we add before remove in the case a timed handler is
-    // added and then deleted before the next _onIdle() call.
-    while (this.addTimeds.length > 0) {
-      this.timedHandlers.push(this.addTimeds.pop());
-    }
+    this.handlerService.addTimedHandlersScheduledForAddition();
+    this.handlerService.removeTimedHandlersScheduledForDeletion();
+    this.handlerService.callReadyTimedHandlers(this.authenticated);
 
-    // remove timed handlers that have been scheduled for deletion
-    while (this.removeTimeds.length > 0) {
-      const thand = this.removeTimeds.pop();
-      const i = this.timedHandlers.indexOf(thand);
-      if (i >= 0) {
-        this.timedHandlers.splice(i, 1);
-      }
-    }
-
-    // call ready timed handlers
-    const now = new Date().getTime();
-    const newList = [];
-    for (const thand of this.timedHandlers) {
-      if (this.authenticated || !thand.user) {
-        const since = thand.lastCalled + thand.period;
-        if (since - now <= 0) {
-          if (thand.run()) {
-            newList.push(thand);
-          }
-        } else {
-          newList.push(thand);
-        }
-      }
-    }
-    this.timedHandlers = newList;
     clearTimeout(this.idleTimeout);
     this.protocolManager.onIdle();
 
@@ -1642,7 +1253,7 @@ export class Connection {
     );
   }
 
-  static getConnectionsUrls(service: string, domain: string) {
+  static getConnectionsUrls(service: string, domain: string): { domain: string; websocketUrl: string; boshServiceUrl: string } {
     const isWebsocket = /wss?:\/\//.test(service);
 
     return {
@@ -1660,23 +1271,23 @@ export class Connection {
    * on whether prebinding is used or not.
    *
    * @param {string} [jid]
-   * @param {string} [password]
+   * @param {string} [password?]
    * @param {boolean} [automatic=false] - An internally used flag that indicates whether
    *  this method was called automatically once the connection has been
    *  initialized. It's used together with the `auto_login` configuration flag
    *  to determine whether Converse should try to log the user in if it
    *  fails to restore a previous auth'd session.
-   *  @returns  {void}
+   *  @param reconnecting
    */
-  async login(jid: string, password?: string, automatic = false): Promise<void> {
+  async login(jid: string, password?: string, automatic = false, reconnecting = false): Promise<void> {
     this.setUserJID(jid);
 
     // See whether there is a BOSH session to re-attach to
-    if (this.protocolManager instanceof Bosh && this.protocolManager.restoreBOSHSession()) {
+    if (this.protocolManager instanceof Bosh && this.protocolManager.restoreBOSHSession(reconnecting)) {
       return;
     }
     if (this.protocolManager instanceof Bosh && this.handlePreBind && !automatic) {
-      return this.protocolManager.startNewPreboundBOSHSession();
+      return this.protocolManager.startNewPreboundBOSHSession(reconnecting);
     }
 
     await this.attemptNewSession(this.authenticationMode, jid, password, automatic);
@@ -1708,8 +1319,9 @@ export class Connection {
         case Status.CONNECTING:
         case Status.REGISTER:
         case Status.REGISTERED:
-          break;
         case Status.AUTHENTICATING:
+        case Status.DISCONNECTING:
+        case Status.DISCONNECTED:
           break;
         case Status.CONNECTED:
           resolve();
@@ -1733,9 +1345,6 @@ export class Connection {
           break;
         case Status.BINDREQUIRED:
           this.bind();
-          break;
-        case Status.DISCONNECTING:
-        case Status.DISCONNECTED:
           break;
         default:
           log(LogLevel.ERROR, `Unhandled connection status; status=${status}`);
@@ -1840,8 +1449,9 @@ export class Connection {
       return;
     }
 
-    this.setDisconnectionCause(Status.AUTHFAIL, undefined, true);
-    this.disconnect('');
+    const message = '';
+    this.connectionStatusSubject.next({ status: Status.AUTHFAIL, message });
+    this.disconnect(message);
   }
 
   async getLoginCredentialsFromBrowser(): Promise<{ password: any; jid: string }> {
@@ -1956,19 +1566,20 @@ export class Connection {
   }
 
   async reconnect(): Promise<void> {
+    this.reconnecting = true;
     log(LogLevel.DEBUG, 'RECONNECTING: the connection has dropped, attempting to reconnect.');
     const isAuthenticationAnonymous = this.authenticationMode === AuthenticationMode.ANONYMOUS;
-
-    if (this.connectionStatus.status === Status.CONNFAIL) {
+    const { status } = await firstValueFrom(this.connectionStatus$);
+    if (status === Status.CONNFAIL) {
       this.switchTransport();
-    } else if (this.connectionStatus.status === Status.AUTHFAIL && isAuthenticationAnonymous) {
+    } else if (status === Status.AUTHFAIL && isAuthenticationAnonymous) {
       // When reconnecting anonymously, we need to connect with only
       // the domain, not the full JID that we had in our previous
       // (now failed) session.
       this.setUserJID(this.domainJid);
     }
 
-    this.setConnectionStatus(Status.RECONNECTING, 'The connection has dropped, attempting to reconnect.');
+    this.connectionStatusSubject.next({ status: Status.RECONNECTING, message: 'The connection has dropped, attempting to reconnect.' });
     /**
      * Triggered when the connection has dropped, but we will attempt
      * to reconnect again.
@@ -1976,7 +1587,7 @@ export class Connection {
     this.willReconnectSubject.next();
 
     this.reset();
-    await this.login(this.jid);
+    await this.login(this.jid, undefined, false, true);
   }
 
   async logOut(): Promise<void> {
@@ -2075,7 +1686,7 @@ export class Connection {
   private async queryForRegistrationForm(conn: Connection, nsRegister: string): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       // send a get request for registration, to get all required data fields
-      conn.addSysHandler(
+      conn.handlerService.addSysHandler(
         (stanza) => {
           const query = stanza.getElementsByTagName('query');
           if (query.length !== 1) {
@@ -2101,7 +1712,7 @@ export class Connection {
 
   private async submitRegisterInformationQuery(conn: Connection, username: string, password: string, nsRegister: string): Promise<void> {
     return new Promise<void>((resolve, reject) => {
-      conn.addSysHandler(
+      conn.handlerService.addSysHandler(
         (stanza) => {
           let error = null;
 
@@ -2150,7 +1761,6 @@ export class Connection {
    * @param {boolean} reconnecting - Whether we reconnected from an earlier dropped session.
    */
   onConnected(reconnecting: boolean): void {
-    delete this.reconnecting;
     this.flush(); // Solves problem of returned PubSub BOSH response not received by browser
     this.setUserJID(this.jid);
 
@@ -2166,6 +1776,7 @@ export class Connection {
        * Any Strophe stanza handlers will have to be registered anew.
        */
       this.reconnectedSubject.next();
+      this.reconnecting = false;
     } else {
       /**
        * Triggered after the connection has been established
@@ -2174,38 +1785,11 @@ export class Connection {
     }
   }
 
-  /**
-   * Used to keep track of why we got disconnected, so that we can
-   * decide on what the next appropriate action is (in onDisconnected)
-   *
-   * @method Connection.setDisconnectionCause
-   * @param {number} cause - The status number as received from
-   * @param {string} [reason] - An optional user-facing message as to why
-   *  there was a disconnection.
-   * @param {boolean} [override] - An optional flag to replace any previous
-   *  disconnection cause and reason.
-   */
-  setDisconnectionCause(cause: number, reason?: string, override = false): void {
-    if (cause === undefined) {
-      delete this.disconnectionCause;
-      delete this.disconnectionReason;
-    } else if (this.disconnectionCause === undefined || override) {
-      this.disconnectionCause = cause;
-      this.disconnectionReason = reason;
-    }
-  }
-
-  setConnectionStatus(status: Status, message: string): void {
-    this.status = status;
-    this.connectionStatus = { status, message };
-  }
-
-  async finishDisconnection(): Promise<void> {
+  finishDisconnection(): void {
     // Properly tear down the session so that it's possible to manually connect again.
     log(LogLevel.DEBUG, 'DISCONNECTED');
-    delete this.reconnecting;
     this.reset();
-    await this.clearSession();
+    this.clearSession();
     /**
      * Triggered after we disconnected from the XMPP server.
      */
@@ -2218,40 +1802,35 @@ export class Connection {
    * to reconnect.
    *
    */
-  async onDisconnected(disconnectionStatus: Status, disconnectionReason: string, automaticLogin?: boolean): Promise<void> {
+  private async onDisconnected(disconnectionStatus: Status, disconnectionReason: string, automaticLogin?: boolean): Promise<void> {
     if (!automaticLogin) {
       await this.finishDisconnection();
       return;
     }
 
     const authFailed = disconnectionStatus === Status.AUTHFAIL;
-    if ((authFailed && this.credentialsUrl) || this.authenticationMode === AuthenticationMode.ANONYMOUS) {
-      // If `credentials_url` is set, we reconnect, because we might
-      // be receiving expired tokens from the credentials_url.
-      //
-      // If `authentication` is anonymous, we reconnect because we
-      // might have tried to attach with stale BOSH session tokens
-      // or with a cached JID and password
+
+    // If `credentials_url` is set, we reconnect, because we might
+    // be receiving expired tokens from the credentials_url.
+    const failedAuthenticationWithCredentialsUrl = authFailed && this.credentialsUrl;
+
+    // If `authentication` is anonymous, we reconnect because we
+    // might have tried to attach with stale BOSH session tokens
+    // or with a cached JID and password
+    const isConnectionAnonymous = this.authenticationMode === AuthenticationMode.ANONYMOUS;
+
+    const unrecoverableDisconnectionCause = [ErrorCondition.NO_AUTH_MECH, 'host-unknown', 'remote-connection-failed'].includes(
+      disconnectionReason
+    );
+    const isAbleToReconnect = disconnectionStatus !== Status.DISCONNECTING || unrecoverableDisconnectionCause;
+
+    if (failedAuthenticationWithCredentialsUrl || isConnectionAnonymous || isAbleToReconnect) {
       await this.reconnect();
       return;
     }
 
-    if (authFailed) {
-      await this.finishDisconnection();
-      return;
-    }
-
-    if (
-      disconnectionStatus === Status.DISCONNECTING ||
-      disconnectionReason === ErrorCondition.NO_AUTH_MECH ||
-      disconnectionReason === 'host-unknown' ||
-      disconnectionReason === 'remote-connection-failed'
-    ) {
-      await this.finishDisconnection();
-      return;
-    }
-
-    await this.reconnect();
+    this.finishDisconnection();
+    return;
   }
 
   // TODO: Ensure can be replaced by strophe-connection.service then delete
@@ -2263,71 +1842,54 @@ export class Connection {
    * @param {number} status
    * @param {string} message
    */
-  async onConnectStatusChanged(status: Status, message: string): Promise<void> {
-    if (status === Status.ATTACHFAIL) {
-      this.setConnectionStatus(status, message);
-    } else if (status === Status.CONNECTED || status === Status.ATTACHED) {
-      if (this.connectionStatus.status === Status.ATTACHED) {
-        // A different tab must have attached, so nothing to do for us here.
-        return;
-      }
-      this.setConnectionStatus(status, message);
+  async onConnectStatusChanged(status: Status, message: string, reconnecting: boolean): Promise<void> {
+    switch (status) {
+      case Status.REDIRECT:
+      case Status.CONNTIMEOUT:
+      case Status.RECONNECTING:
+      case Status.REGIFAIL:
+      case Status.REGISTER:
+      case Status.REGISTERED:
+      case Status.CONFLICT:
+      case Status.NOTACCEPTABLE:
+      default:
+        break;
+      case Status.ERROR:
+      case Status.CONNECTING:
+      case Status.CONNFAIL:
+      case Status.AUTHENTICATING:
+      case Status.DISCONNECTING:
+      case Status.ATTACHFAIL:
+        this.connectionStatusSubject.next({ status, message });
+        break;
+      case Status.DISCONNECTED:
+      case Status.AUTHFAIL:
+        this.connectionStatusSubject.next({ status, message });
+        await this.onDisconnected(status, message);
+        break;
+      case Status.CONNECTED:
+      case Status.ATTACHED:
+        this.connectionStatusSubject.next({ status, message });
 
-      // By default, we always want to send out an initial presence stanza.
-      this.sendInitialPresence = true;
-      this.setDisconnectionCause(undefined);
-      if (this.reconnecting) {
-        log(LogLevel.DEBUG, status === Status.CONNECTED ? 'Reconnected' : 'Reattached');
-        this.onConnected(true);
-      } else {
-        log(LogLevel.DEBUG, status === Status.CONNECTED ? 'Connected' : 'Attached');
-        if (this.restored) {
-          // No need to send an initial presence stanza when
-          // we're restoring an existing session.
-          this.sendInitialPresence = false;
+        const isConnected = status === Status.CONNECTED;
+        if (reconnecting) {
+          log(LogLevel.DEBUG, isConnected ? 'Reconnected' : 'Reattached');
+        } else {
+          log(LogLevel.DEBUG, isConnected ? 'Connected' : 'Attached');
         }
-        this.onConnected(false);
-      }
-    } else if (status === Status.DISCONNECTED) {
-      this.setDisconnectionCause(status, message);
-      await this.onDisconnected(status, message);
-    } else if (status === Status.BINDREQUIRED) {
-      this.bind();
-    } else if (status === Status.ERROR) {
-      this.setConnectionStatus(status, 'An error occurred while connecting to the chat server.');
-    } else if (status === Status.CONNECTING) {
-      this.setConnectionStatus(status, message);
-    } else if (status === Status.AUTHENTICATING) {
-      this.setConnectionStatus(status, message);
-    } else if (status === Status.AUTHFAIL) {
-      if (!message) {
-        message = 'Your XMPP address and/or password is incorrect. Please try again.';
-      }
-      this.setConnectionStatus(status, message);
-      this.setDisconnectionCause(status, message, true);
-      await this.onDisconnected(status, message);
-    } else if (status === Status.CONNFAIL) {
-      let feedback = message;
-      if (message === 'host-unknown' || message == 'remote-connection-failed') {
-        feedback = 'Sorry, we could not connect to the XMPP host with domain: ' + this.domainJid;
-      } else if (message !== undefined && message === ErrorCondition?.NO_AUTH_MECH) {
-        feedback = 'The XMPP server did not offer a supported authentication mechanism';
-      }
-      this.setConnectionStatus(status, feedback);
-      this.setDisconnectionCause(status, message);
-    } else if (status === Status.DISCONNECTING) {
-      this.setDisconnectionCause(status, message);
+
+        this.onConnected(reconnecting);
+        break;
+      case Status.BINDREQUIRED:
+        this.bind();
+        break;
     }
   }
 
-  private clearSession(): void {
+  clearSession(): void {
     delete this.domainJid;
     delete this.bareJid;
     delete this.session;
     this.setProtocol();
-  }
-
-  killSessionBosh(): void {
-    this.clearSession();
   }
 }

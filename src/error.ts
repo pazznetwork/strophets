@@ -11,6 +11,8 @@ import { Handler } from './handler';
 import { fatal } from './log';
 
 export enum ErrorCondition {
+  HOST_UNKNOWN = 'host-unknown',
+  REMOTE_CONNECTION_FAILED = 'remote-connection-failed',
   BAD_FORMAT = 'bad-format',
   CONFLICT = 'conflict',
   MISSING_JID_NODE = 'x-strophe-bad-non-anon-jid',

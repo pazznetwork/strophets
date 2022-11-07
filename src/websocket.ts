@@ -488,7 +488,7 @@ export class StropheWebsocket implements ProtocolManager {
       // wait for the </stream:stream> tag before we close the connection
       return;
     }
-    this.connection._dataRecv(elem);
+    this.connection.dataReceived(elem);
   }
 
   /** PrivateFunction: _onOpen
