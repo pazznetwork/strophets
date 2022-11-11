@@ -6,7 +6,6 @@
  *   - explicitResourceBinding (to have additional step for connections setups)
  *  WebSocket only:
  *   - protocol (upgrade current protocol to ws or wss)
- *   - worker (url to load the worker script from, for example for shared sessions)
  *  BOSH only:
  *   - sync (make requests synchronous)
  *   - customHeaders (add custom headers to requests)

@@ -1,25 +1,25 @@
 import { clientChallenge, scramResponse } from './scram';
-import { SASLMechanismBase } from './sasl';
-import { Connection } from './connection';
+import { SASLMechanismBase } from './sasl-mechanism-base';
+import { Sasl } from './sasl';
 
 export class SASLSHA1 extends SASLMechanismBase {
-  /** PrivateConstructor: SASLSHA1
+  /**
    *  SASL SCRAM SHA 1 authentication.
    */
   constructor() {
     super('SCRAM-SHA-1', true, 60);
   }
 
-  test(connection: Connection) {
-    return connection.authcid !== null;
+  test(sasl: Sasl): boolean {
+    return sasl.authcid !== null;
   }
 
-  async onChallenge(connection: Connection, challenge?: string): Promise<string> {
-    const result = await scramResponse(connection, challenge, 'SHA-1', 160);
+  async onChallenge(sasl: Sasl, challenge?: string): Promise<string> {
+    const result = await scramResponse(sasl, challenge, 'SHA-1', 160);
     return result.toString();
   }
 
-  async clientChallenge(connection: Connection, test_cnonce: string): Promise<string> {
-    return clientChallenge(connection, test_cnonce);
+  async clientChallenge(sasl: Sasl, testCnonce: string): Promise<string> {
+    return Promise.resolve(clientChallenge(sasl, testCnonce));
   }
 }

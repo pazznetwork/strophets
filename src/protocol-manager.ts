@@ -1,10 +1,8 @@
 import { Connection } from './connection';
 import { Status } from './status';
-import { Request } from './request';
 
 export interface ProtocolManager {
   connection: Connection;
-  strip: string;
 
   /**
    *  Reset the connection.
@@ -15,16 +13,9 @@ export interface ProtocolManager {
   reset(): void;
 
   /**
-   *
-   * @param wait - The optional HTTPBIND wait value.  This is the
-   *      time the server will wait before returning an empty result for
-   *      a request.  The default setting of 60 seconds is recommended.
-   * @param hold - The optional HTTPBIND hold value.  This is the
-   *      number of connections the server will hold at one time.  This
-   *      should almost always be set to 1 (the default).
-   * @param route - The optional route value.
+   * Connect to the server using the current protocol manager
    */
-  connect(wait?: number, hold?: number, route?: string): void;
+  connect(): void;
 
   /**
    *
@@ -57,34 +48,12 @@ export interface ProtocolManager {
   /**
    * Called on stream start/restart when no stream:features has been received.
    */
-  noAuthReceived(callback: () => void): void;
-
-  /**
-   * Timeout handler for handling non-graceful disconnection. This does nothing for WebSockets
-   */
-  onDisconnectTimeout(): void;
-
-  /**
-   * makes sure all pending requests are aborted.
-   */
-  abortAllRequests(): void;
+  noAuthReceived(): void;
 
   /**
    *  sends all queued stanzas
    */
   onIdle(): void;
-
-  /**
-   *
-   * Get a stanza out of a request. WebSockets don't use requests, so the passed argument is just returned.
-   *
-   *  Parameters:
-   *    (Object) stanza - The stanza.
-   *
-   *  Returns:
-   *    The stanza that was passed.
-   */
-  reqToData(request: Request): Element;
 
   /**
    *  Part of the Connection.send function for WebSocket

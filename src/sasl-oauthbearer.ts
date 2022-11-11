@@ -1,6 +1,6 @@
-import { SASLMechanismBase } from './sasl';
 import { utf16to8 } from './utils';
-import { Connection } from './connection';
+import { SASLMechanismBase } from './sasl-mechanism-base';
+import { Sasl } from './sasl';
 
 export class SASLOAuthBearer extends SASLMechanismBase {
   /** PrivateConstructor: SASLOAuthBearer
@@ -10,21 +10,21 @@ export class SASLOAuthBearer extends SASLMechanismBase {
     super('OAUTHBEARER', true, 40);
   }
 
-  test(connection: Connection): boolean {
-    return connection.pass !== null;
+  test(sasl: Sasl): boolean {
+    return sasl.pass !== null;
   }
 
-  async onChallenge(connection: Connection): Promise<string> {
+  onChallenge(sasl: Sasl): Promise<string> {
     let auth_str = 'n,';
-    if (connection.authcid !== null) {
-      auth_str = auth_str + 'a=' + connection.authzid;
+    if (sasl.authcid !== null) {
+      auth_str = auth_str + 'a=' + sasl.authzid;
     }
     auth_str = auth_str + ',';
     auth_str = auth_str + '\u0001';
     auth_str = auth_str + 'auth=Bearer ';
-    auth_str = auth_str + connection.pass;
+    auth_str = auth_str + sasl.pass;
     auth_str = auth_str + '\u0001';
     auth_str = auth_str + '\u0001';
-    return utf16to8(auth_str);
+    return Promise.resolve(utf16to8(auth_str));
   }
 }

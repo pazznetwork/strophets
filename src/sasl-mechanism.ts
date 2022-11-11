@@ -1,4 +1,4 @@
-import { Connection } from './connection';
+import { Sasl } from './sasl';
 
 /**
  *  encapsulates SASL authentication mechanisms.
@@ -55,7 +55,7 @@ export interface SASLMechanism {
    *
    *  @returns (Boolean) If mechanism was able to run.
    */
-  test(connection: Connection): boolean;
+  test(sasl: Sasl): boolean;
 
   /**
    *  Called by protocol implementation on incoming challenge.
@@ -71,7 +71,7 @@ export interface SASLMechanism {
    *  Returns:
    *    (String) Mechanism response.
    */
-  onChallenge(connection: Connection, challenge?: string): Promise<string>;
+  onChallenge(sasl: Sasl, challenge?: string): Promise<string>;
 
   /**
    *  Called before starting mechanism on some connection.
@@ -79,7 +79,7 @@ export interface SASLMechanism {
    *  Parameters:
    *    (Strophe.Connection) connection - Target Connection.
    */
-  onStart(connection: Connection): void;
+  onStart(sasl: Sasl): void;
 
   /**
    *  Protocol informs mechanism implementation about SASL failure.
@@ -101,50 +101,5 @@ export interface SASLMechanism {
    *  Returns:
    *    (String) Mechanism response.
    */
-  clientChallenge(connection: Connection, challenge?: string): Promise<string>;
-}
-
-export abstract class SASLMechanismBase implements SASLMechanism {
-  private _connection: Connection;
-
-  protected constructor(readonly mechname: string, readonly isClientFirst: boolean, readonly priority: number) {}
-
-  abstract onChallenge(connection: Connection, challenge?: string): Promise<string>;
-
-  abstract test(connection: Connection): boolean;
-
-  onStart(connection: Connection): void {
-    this._connection = connection;
-  }
-
-  /** PrivateFunction: onFailure
-   *  Protocol informs mechanism implementation about SASL failure.
-   */
-  onFailure(): void {
-    this._connection = null;
-  }
-
-  /** PrivateFunction: onSuccess
-   *  Protocol informs mechanism implementation about SASL success.
-   */
-  onSuccess(): void {
-    this._connection = null;
-  }
-
-  /** PrivateFunction: clientChallenge
-   *  Called by the protocol implementation if the client is expected to send
-   *  data first in the authentication exchange (i.e. isClientFirst === true).
-   *
-   *  Parameters:
-   *    (Strophe.Connection) connection - Target Connection.
-   *
-   *  Returns:
-   *    (String) Mechanism response.
-   */
-  clientChallenge(connection: Connection, challenge?: string): Promise<string> {
-    if (!this.isClientFirst) {
-      throw new Error('clientChallenge should not be called if isClientFirst is false!');
-    }
-    return this.onChallenge(connection, challenge);
-  }
+  clientChallenge(sasl: Sasl, challenge?: string): Promise<string>;
 }

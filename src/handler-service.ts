@@ -10,10 +10,13 @@ export class HandlerService {
   // handler lists
   timedHandlers: TimedHandler[] = [];
   handlers: Handler[] = [];
-  removeTimeds: TimedHandler[] = [];
+  handlersAsync: HandlerAsync[] = [];
+
+  removeTimedHandlers: TimedHandler[] = [];
   removeHandlers: Handler[] = [];
   removeHandlersAsync: HandlerAsync[] = [];
-  addTimeds: TimedHandler[] = [];
+
+  addTimedHandlers: TimedHandler[] = [];
   addHandlers: Handler[] = [];
   addHandlersAsync: HandlerAsync[] = [];
 
@@ -36,10 +39,13 @@ export class HandlerService {
   resetHandlers(): void {
     this.timedHandlers = [];
     this.handlers = [];
-    this.removeTimeds = [];
+    this.handlersAsync = [];
+    this.removeTimedHandlers = [];
     this.removeHandlers = [];
-    this.addTimeds = [];
+    this.removeHandlersAsync = [];
+    this.addTimedHandlers = [];
     this.addHandlers = [];
+    this.addHandlersAsync = [];
   }
 
   checkHandlerChain(authenticated: boolean, child: Element): void {
@@ -94,7 +100,7 @@ export class HandlerService {
    */
   addTimedHandler(period: number, handler: () => boolean): TimedHandler {
     const thand = new TimedHandler(period, handler);
-    this.addTimeds.push(thand);
+    this.addTimedHandlers.push(thand);
     return thand;
   }
 
@@ -112,7 +118,7 @@ export class HandlerService {
   deleteTimedHandler(handRef: TimedHandler): void {
     // this must be done in the Idle loop so that we don't change
     // the handlers during iteration
-    this.removeTimeds.push(handRef);
+    this.removeTimedHandlers.push(handRef);
   }
 
   /**
@@ -249,11 +255,10 @@ export class HandlerService {
    *    (Integer) period - The period of the handler.
    *    (Function) handler - The callback function.
    */
-  addSysTimedHandler(period: number, handler: () => boolean) {
-    const thand = new TimedHandler(period, handler);
-    thand.user = false;
-    this.addTimeds.push(thand);
-    return thand;
+  addSysTimedHandler(period: number, handler: () => boolean): TimedHandler {
+    const timedHandler = new TimedHandler(period, handler, false);
+    this.addTimedHandlers.push(timedHandler);
+    return timedHandler;
   }
 
   removeScheduledHandlers(): void {
@@ -280,9 +285,14 @@ export class HandlerService {
    *    @param {string} type - The stanza type attribute to match.
    *    @param {string} id - The stanza id attribute to match.
    */
-  addSysHandler(handler: (element: Element) => boolean, ns: string, name: string, type: string, id: string): Handler {
-    const hand = new Handler(handler, ns, name, type, id);
-    hand.user = false;
+  addSysHandler(
+    handler: (element: Element) => boolean,
+    ns: string,
+    name: string,
+    type: string,
+    id: string
+  ): Handler {
+    const hand = new Handler(handler, ns, name, type, id, undefined, undefined, false);
     this.addHandlers.push(hand);
     return hand;
   }
@@ -300,9 +310,14 @@ export class HandlerService {
    *    @param {string} type - The stanza type attribute to match.
    *    @param {string} id - The stanza id attribute to match.
    */
-  addSysHandlerPromise(handler: (element: Element) => Promise<boolean>, ns: string, name: string, type: string, id: string): HandlerAsync {
-    const hand = new HandlerAsync(handler, ns, name, type, id);
-    hand.user = false;
+  addSysHandlerPromise(
+    handler: (element: Element) => Promise<boolean>,
+    ns: string,
+    name: string,
+    type: string,
+    id: string
+  ): HandlerAsync {
+    const hand = new HandlerAsync(handler, ns, name, type, id, undefined, undefined, false);
     this.addHandlersAsync.push(hand);
     return hand;
   }
@@ -323,15 +338,15 @@ export class HandlerService {
    *  added and then deleted before the next _onIdle() call.
    */
   addTimedHandlersScheduledForAddition(): void {
-    while (this.addTimeds.length > 0) {
-      this.timedHandlers.push(this.addTimeds.pop());
+    while (this.addTimedHandlers.length > 0) {
+      this.timedHandlers.push(this.addTimedHandlers.pop());
     }
   }
 
   removeTimedHandlersScheduledForDeletion(): void {
-    while (this.removeTimeds.length > 0) {
-      const thand = this.removeTimeds.pop();
-      const i = this.timedHandlers.indexOf(thand);
+    while (this.removeTimedHandlers.length > 0) {
+      const timedHandlers = this.removeTimedHandlers.pop();
+      const i = this.timedHandlers.indexOf(timedHandlers);
       if (i >= 0) {
         this.timedHandlers.splice(i, 1);
       }
@@ -342,7 +357,6 @@ export class HandlerService {
    *  Call ready timed handlers
    *
    * @param authenticated
-   * @param newList
    */
   callReadyTimedHandlers(authenticated: boolean): void {
     const now = new Date().getTime();
@@ -350,10 +364,8 @@ export class HandlerService {
     for (const timedHandler of this.timedHandlers) {
       if (authenticated || !timedHandler.user) {
         const since = timedHandler.lastCalled + timedHandler.period;
-        if (since - now <= 0) {
-          if (timedHandler.run()) {
-            newList.push(timedHandler);
-          }
+        if (since - now <= 0 && timedHandler.run()) {
+          newList.push(timedHandler);
         } else {
           newList.push(timedHandler);
         }

@@ -13,9 +13,6 @@ import { forEachChild, getBareJidFromJid, isTagEqual } from './xml';
 import { handleError } from './error';
 
 export class HandlerAsync {
-  private options: { matchBareFromJid?: boolean; ignoreNamespaceFragment: boolean };
-  user: boolean;
-
   /**
    * Create and initialize a new Strophe.Handler
    *
@@ -28,6 +25,7 @@ export class HandlerAsync {
    * @param id id to match the incoming stanza against to find the right handler
    * @param from from jid to match the incoming stanza against to find the right handler
    * @param options matchBareFromJid match only the local and domain of the jid, ignoreNamespaceFragment ignores '#' in namespace
+   * @param user whether the handler is a user handler or a system handler
    */
   constructor(
     private readonly handler: (stanza: Element) => Promise<boolean>,
@@ -36,19 +34,13 @@ export class HandlerAsync {
     private readonly type: string | string[],
     private readonly id?: string,
     private readonly from?: string,
-    options?: { matchBareFromJid?: boolean; ignoreNamespaceFragment: boolean }
+    readonly options = { matchBareFromJid: false, ignoreNamespaceFragment: false },
+    readonly user = true
   ) {
-    this.options = options || { matchBareFromJid: false, ignoreNamespaceFragment: false };
-    if (this.options.matchBareFromJid) {
-      this.from = from ? getBareJidFromJid(from) : null;
-    } else {
-      this.from = from;
-    }
-    // whether the handler is a user handler or a system handler
-    this.user = true;
+    this.from = options.matchBareFromJid ? getBareJidFromJid(from) : from;
   }
 
-  /** PrivateFunction: getNamespace
+  /**
    *  Returns the XML namespace attribute on an element.
    *  If `ignoreNamespaceFragment` was passed in for this handler, then the
    *  URL fragment will be stripped.
@@ -67,7 +59,7 @@ export class HandlerAsync {
     return elNamespace;
   }
 
-  /** PrivateFunction: namespaceMatch
+  /**
    *  Tests if a stanza matches the namespace set for this Strophe.Handler.
    *
    *  Parameters:
@@ -109,7 +101,10 @@ export class HandlerAsync {
     return (
       this.namespaceMatch(elem) &&
       (!this.name || isTagEqual(elem, this.name)) &&
-      (!this.type || (Array.isArray(this.type) ? this.type.indexOf(elem_type) !== -1 : elem_type === this.type)) &&
+      (!this.type ||
+        (Array.isArray(this.type)
+          ? this.type.indexOf(elem_type) !== -1
+          : elem_type === this.type)) &&
       (!this.id || elem.getAttribute('id') === this.id) &&
       (!this.from || from === this.from)
     );

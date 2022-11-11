@@ -1,6 +1,6 @@
 import { Connection } from './connection';
 import { NS } from './namespace';
-import { Request } from './request';
+import { BoshRequest } from './bosh-request';
 import { $build } from './builder-helper';
 import { getBareJidFromJid, getDomainFromJid, getNodeFromJid } from './xml';
 import { debug, error, warn } from './log';
@@ -8,40 +8,47 @@ import { Status } from './status';
 import { SECONDARY_TIMEOUT, TIMEOUT } from './timeout';
 import { ProtocolManager } from './protocol-manager';
 import { Subject, takeUntil } from 'rxjs';
+import { Builder } from './builder';
 
 /**
  *  The Bosh class is used internally by the Connection class to encapsulate BOSH sessions.
  */
 export class Bosh implements ProtocolManager {
-  rid = Math.floor(Math.random() * 4294967295);
+  /***
+   * First request id for XML request elements.
+   * The rid will be incremented with each request until the connection resets.
+   * An incrementation range check is used to ensure a limit of parallel requests.
+   */
+  rid = this.getRandomIdForConnection();
   private sid: string = null;
 
-  // default BOSH values
-  hold = 1;
+  /**
+   * This is the time the server will wait before returning an empty result for a request.
+   * The default setting of 60 seconds is recommended.
+   */
   wait = 60;
-  limit = 5;
-  private inactivity: number;
 
+  /**
+   * This is the amount of allowed parallel request being processed. The default is 5.
+   */
+  limit = 5;
   private lastResponseHeaders: string;
-  private readonly _requests: any[];
+  //TODO: there are in general only 2 requests should be refactored into a tupel or two request properties
+  private readonly requests: BoshRequest[];
 
   private destroySubject = new Subject<void>();
   private readonly notAbleToResumeBOSHSessionSubject = new Subject<void>();
   notAbleToResumeBOSHSession$ = this.notAbleToResumeBOSHSessionSubject.asObservable();
 
-  /**
-   *  BOSH-Connections will have all stanzas wrapped in a <body> tag when
-   *  passed to <Strophe.Connection.xmlInput> or <Strophe.Connection.xmlOutput>.
-   *  To strip this tag, User code can set <Strophe.Bosh.strip> to "body":
-   *
-   *  > Strophe.Bosh.prototype.strip = "body";
-   *
-   *  This will enable stripping of the body tag in both
-   *  <Strophe.Connection.xmlInput> and <Strophe.Connection.xmlOutput>.
-   */
-  strip: string;
-
   jid: string;
+
+  get primaryTimeout(): number {
+    return Math.floor(TIMEOUT * this.wait);
+  }
+
+  get secondaryTimeout(): number {
+    return Math.floor(SECONDARY_TIMEOUT * this.wait);
+  }
 
   /**
    *  Create and initialize a Strophe.Bosh object.
@@ -52,76 +59,81 @@ export class Bosh implements ProtocolManager {
    *    @param prebindUrl
    */
   constructor(readonly connection: Connection, private readonly prebindUrl?: string) {
-    this.connection.userJid$.pipe(takeUntil(this.destroySubject)).subscribe((newJid) => (this.jid = newJid));
+    this.connection.userJid$
+      .pipe(takeUntil(this.destroySubject))
+      .subscribe((newJid) => (this.jid = newJid));
 
-    /* request id for body tags */
-    this.rid = Math.floor(Math.random() * 4294967295);
     /* The current session ID. */
     this.sid = null;
 
     this.lastResponseHeaders = null;
-    this._requests = [];
+    this.requests = [];
+  }
+
+  getRandomIdForConnection(): number {
+    return Math.floor(Math.random() * 4294967295);
   }
 
   /**
    *  function that initializes the BOSH connection.
    *
    *  Creates and sends the Request that initializes the BOSH connection.
-   *
-   * @param wait - The optional HTTPBIND wait value.  This is the
-   *      time the server will wait before returning an empty result for
-   *      a request.  The default setting of 60 seconds is recommended.
-   * @param hold - The optional HTTPBIND hold value.  This is the
-   *      number of connections the server will hold at one time.  This
-   *      should almost always be set to 1 (the default).
-   * @param route - The optional route value.
+   *  No Route:Design:1.1
    */
-  connect(wait?: number, hold?: number, route?: string) {
-    this.wait |= wait;
-    this.hold |= hold;
-
+  connect(): void {
     const body = this.buildBody().attrs({
       to: this.connection.domain,
       'xml:lang': 'en',
       wait: this.wait.toString(10),
-      hold: this.hold.toString(10),
+      hold: '1',
       content: 'text/xml; charset=utf-8',
       ver: '1.6',
       'xmpp:version': '1.0',
-      'xmlns:xmpp': NS.BOSH
+      'xmlns:xmpp': NS.BOSH,
     });
-    if (route) {
-      body.attrs({ route });
-    }
 
-    // eslint-disable-next-line @typescript-eslint/unbound-method
-    const connectCb = this.connection._connect_cb;
-    this._requests.push(
-      new Request(
+    this.requests.push(
+      new BoshRequest(
         body.tree(),
-        this._onRequestStateChange.bind(this, connectCb.bind(this.connection)),
+        (req) =>
+          this.onRequestStateChange(
+            (requestElement) => this.connection.connectCallback(requestElement.xmlData),
+            req
+          ),
         Number.parseInt(body.tree().getAttribute('rid'), 10)
       )
     );
-    this._throttledRequestHandler();
+    this.throttledRequestHandler();
   }
 
   /**
    *  helper function to generate the <body/> wrapper for BOSH.
    *
-   *  Returns:
-   *    A Builder with a <body/> element.
+   *  @returns  A Builder containing a <body/> element.
    */
-  buildBody() {
+  buildBody(): Builder {
     const bodyWrap = $build('body', {
       rid: (this.rid++).toString(),
-      xmlns: NS.HTTPBIND
+      xmlns: NS.HTTPBIND,
     });
     if (this.sid != null) {
       bodyWrap.attrs({ sid: this.sid });
     }
     if (this.connection.options.keepalive) {
-      this.cacheSession();
+      if (this.connection.authenticated) {
+        if (this.connection.jid && this.rid && this.sid) {
+          window.sessionStorage.setItem(
+            'strophe-bosh-session',
+            JSON.stringify({
+              jid: this.connection.jid,
+              rid: this.rid,
+              sid: this.sid,
+            })
+          );
+        }
+      } else {
+        window.sessionStorage.removeItem('strophe-bosh-session');
+      }
     }
     return bodyWrap;
   }
@@ -131,12 +143,10 @@ export class Bosh implements ProtocolManager {
    *
    *  This function is called by the reset function of the Strophe Connection
    */
-  reset() {
-    this.rid = Math.floor(Math.random() * 4294967295);
+  reset(): void {
+    this.rid = this.getRandomIdForConnection();
     this.sid = null;
     globalThis.sessionStorage.removeItem('strophe-bosh-session');
-
-    this.connection.nextValidRid(this.rid);
   }
 
   /**
@@ -153,37 +163,21 @@ export class Bosh implements ProtocolManager {
    *    (String) rid - The current RID of the BOSH session.  This RID
    *      will be used by the next request.
    *    (Function) callback The connect-callback function.
-   *    (Integer) wait - The optional HTTPBIND wait value.  This is the
-   *      time the server will wait before returning an empty result for
-   *      a request.  The default setting of 60 seconds is recommended.
-   *      Other settings will require tweaks to the Strophe.TIMEOUT value.
-   *    (Integer) hold - The optional HTTPBIND hold value.  This is the
-   *      number of connections the server will hold at one time.  This
-   *      should almost always be set to 1 (the default).
-   *    (Integer) limit - The optional HTTBIND limitow value.  This is the
-   *      allowed range of request ids that are valid.  The default is 5.
    */
   attach(
     jid: string,
     sid: string,
     rid: number,
-    callback: (status: number, condition: string) => unknown,
-    wait?: number,
-    hold?: number,
-    limit?: number
+    callback: (status: number, condition: string) => Promise<void>
   ): void {
     this.connection.jid = jid;
     this.sid = sid;
     this.rid = rid;
 
-    this.connection.connectCallback = callback;
+    this.connection.callback = callback;
     this.connection.domain = getDomainFromJid(this.connection.jid);
     this.connection.authenticated = true;
     this.connection.connected = true;
-
-    this.wait |= wait;
-    this.hold |= hold;
-    this.limit |= limit;
 
     this.connection.changeConnectStatus(Status.ATTACHED, null);
   }
@@ -191,23 +185,13 @@ export class Bosh implements ProtocolManager {
   /**
    *  Attempt to restore a cached BOSH session
    *
-   *  Parameters:
-   *    (String) jid - The full JID that is bound by the session.
+   *   @param jid - The full JID that is bound by the session.
    *      This parameter is optional but recommended, specifically in cases
    *      where prebinded BOSH sessions are used where it's important to know
    *      that the right session is being restored.
-   *    (Function) callback The connect callback function.
-   *    (Integer) wait - The optional HTTPBIND wait value.  This is the
-   *      time the server will wait before returning an empty result for
-   *      a request.  The default setting of 60 seconds is recommended.
-   *      Other settings will require tweaks to the Strophe.TIMEOUT value.
-   *    (Integer) hold - The optional HTTPBIND hold value.  This is the
-   *      number of connections the server will hold at one time.  This
-   *      should almost always be set to 1 (the default).
-   *    (Integer) limit - The optional HTTBIND window value.  This is the
-   *      allowed range of request ids that are valid.  The default is 5.
+   *   @param callback function.
    */
-  restore(jid: string, callback: (status: number, condition: string) => unknown, wait?: number, hold?: number, limit?: number): void {
+  restore(jid: string, callback: (status: number, condition: string) => Promise<void>): void {
     const session = JSON.parse(window.sessionStorage.getItem('strophe-bosh-session'));
     if (
       session != null &&
@@ -220,95 +204,39 @@ export class Bosh implements ProtocolManager {
         // we compare only the domains:
         (getNodeFromJid(jid) == null && getDomainFromJid(session.jid) === jid))
     ) {
-      this.attach(session.jid, session.sid, session.rid, callback, wait, hold, limit);
+      this.attach(session.jid, session.sid, session.rid, callback);
     } else {
       throw new Error('restore: no session that can be restored.');
     }
   }
 
   /**
-   *  handler for the beforeunload event.
-   *
    *  This handler is used to process the Bosh-part of the initial request.
-   *  Parameters:
-   *    (Strophe.Request) bodyWrap - The received stanza.
+   *
+   *   @param bodyWrap - The received stanza.
+   *
+   *   @returns Status
    */
-  cacheSession() {
-    if (this.connection.authenticated) {
-      if (this.connection.jid && this.rid && this.sid) {
-        window.sessionStorage.setItem(
-          'strophe-bosh-session',
-          JSON.stringify({
-            jid: this.connection.jid,
-            rid: this.rid,
-            sid: this.sid
-          })
-        );
-      }
-    } else {
-      window.sessionStorage.removeItem('strophe-bosh-session');
+  connectCb(bodyWrap: Element): Status.CONNECTED | Status.CONNFAIL {
+    if (bodyWrap.getAttribute('type') !== 'terminate') {
+      return Status.CONNECTED;
     }
+
+    // an error occurred
+    const cond = bodyWrap.getAttribute('condition');
+    error('BOSH-Connection failed: ' + cond);
+    this.connection.changeConnectStatus(Status.CONNFAIL, cond ?? 'unknown');
+    this.connection.doDisconnect(cond);
+    return Status.CONNFAIL;
   }
 
   /**
-   *  handler for initial connection request.
+   *  part of disconnect for Bosh
    *
-   *  This handler is used to process the Bosh-part of the initial request.
-   *  Parameters:
-   *    (Strophe.Request) bodyWrap - The received stanza.
+   *   @param pres - This stanza will be sent before disconnecting.
    */
-  connectCb(bodyWrap: Element) {
-    const typ = bodyWrap.getAttribute('type');
-    if (typ !== null && typ === 'terminate') {
-      // an error occurred
-      let cond = bodyWrap.getAttribute('condition');
-      error('BOSH-Connection failed: ' + cond);
-      const conflict = bodyWrap.getElementsByTagName('conflict');
-      if (cond !== null) {
-        if (cond === 'remote-stream-error' && conflict.length > 0) {
-          cond = 'conflict';
-        }
-        this.connection.changeConnectStatus(Status.CONNFAIL, cond);
-      } else {
-        this.connection.changeConnectStatus(Status.CONNFAIL, 'unknown');
-      }
-      this.connection.doDisconnect(cond);
-      return Status.CONNFAIL;
-    }
-
-    // check to make sure we don't overwrite these if _connect_cb is
-    // called multiple times in the case of missing stream:features
-    if (!this.sid) {
-      this.sid = bodyWrap.getAttribute('sid');
-    }
-    const wind = bodyWrap.getAttribute('requests');
-    if (wind) {
-      this.limit = parseInt(wind, 10);
-    }
-    const hold = bodyWrap.getAttribute('hold');
-    if (hold) {
-      this.hold = parseInt(hold, 10);
-    }
-    const wait = bodyWrap.getAttribute('wait');
-    if (wait) {
-      this.wait = parseInt(wait, 10);
-    }
-    const inactivity = bodyWrap.getAttribute('inactivity');
-    if (inactivity) {
-      this.inactivity = parseInt(inactivity, 10);
-    }
-
-    return Status.CONNECTED;
-  }
-
-  /**
-   *  part of Connection.disconnect for Bosh
-   *
-   *  Parameters:
-   *    (Request) pres - This stanza will be sent before disconnecting.
-   */
-  disconnect(pres: Element) {
-    this._sendTerminate(pres);
+  disconnect(pres: Element): void {
+    this.sendTerminate(pres);
   }
 
   /**
@@ -316,40 +244,36 @@ export class Bosh implements ProtocolManager {
    *
    *  Resets the SID and RID.
    */
-  doDisconnect() {
+  doDisconnect(): void {
     this.sid = null;
-    this.rid = Math.floor(Math.random() * 4294967295);
+    this.rid = this.getRandomIdForConnection();
     globalThis.sessionStorage.removeItem('strophe-bosh-session');
-
-    this.connection.nextValidRid(this.rid);
   }
 
   /**
-   function to check if the Request queue is empty.
+   * function to check if the Request queue is empty.
    *
-   *  Returns:
-   *    True, if there are no Requests queued, False otherwise.
+   *  @returns true, if there are no Requests queued, False otherwise.
    */
-  emptyQueue() {
-    return this._requests.length === 0;
+  emptyQueue(): boolean {
+    return this.requests.length === 0;
   }
 
   /**
    * Called on stream start/restart when no stream:features
    * has been received and sends a blank poll request.
    */
-  noAuthReceived(callback: () => void) {
-    warn('Server did not yet offer a supported authentication ' + 'mechanism. Sending a blank poll request.');
-    if (callback) {
-      callback = callback.bind(this.connection);
-    } else {
-      callback = this.connection._connect_cb.bind(this.connection);
-    }
-    const body = this.buildBody();
-    this._requests.push(
-      new Request(body.tree(), this._onRequestStateChange.bind(this, callback), Number.parseInt(body.tree().getAttribute('rid'), 10))
+  noAuthReceived(): void {
+    warn(
+      'Server did not yet offer a supported authentication ' +
+        'mechanism. Sending a blank poll request.'
     );
-    this._throttledRequestHandler();
+    const body = this.buildBody();
+    const rid = Number.parseInt(body.tree().getAttribute('rid'), 10);
+    this.requests.push(
+      new BoshRequest(body.tree(), (req) => this.connection.connectCallback(req.xmlData), rid)
+    );
+    this.throttledRequestHandler();
   }
 
   /**
@@ -357,16 +281,16 @@ export class Bosh implements ProtocolManager {
    *
    *  Cancels all remaining Requests and clears the queue.
    */
-  onDisconnectTimeout() {
+  onDisconnectTimeout(): void {
     this.abortAllRequests();
   }
 
   /**
    *  helper function that makes sure all pending requests are aborted.
    */
-  abortAllRequests() {
-    while (this._requests.length > 0) {
-      const req = this._requests.pop();
+  abortAllRequests(): void {
+    while (this.requests.length > 0) {
+      const req = this.requests.pop();
       req.abort = true;
       req.xhr.abort();
       req.xhr.onreadystatechange = () => {};
@@ -378,10 +302,15 @@ export class Bosh implements ProtocolManager {
    *
    *  Sends all queued Requests or polls with empty Request if there are none.
    */
-  onIdle() {
+  onIdle(): void {
     const data = this.connection.data;
     // if no requests are in progress, poll
-    if (this.connection.authenticated && this._requests.length === 0 && data.length === 0 && !this.connection.disconnecting) {
+    if (
+      this.connection.authenticated &&
+      this.requests.length === 0 &&
+      data.length === 0 &&
+      !this.connection.disconnecting
+    ) {
       debug('no requests during idle cycle, sending blank request');
       data.push(null);
     }
@@ -390,7 +319,7 @@ export class Bosh implements ProtocolManager {
       return;
     }
 
-    if (this._requests.length < 2 && data.length > 0) {
+    if (this.requests.length < 2 && data.length > 0) {
       const body = this.buildBody();
       for (const dataPart of data) {
         if (dataPart !== null && dataPart.tagName !== 'restart') {
@@ -401,58 +330,37 @@ export class Bosh implements ProtocolManager {
           to: this.connection.domain,
           'xml:lang': 'en',
           'xmpp:restart': 'true',
-          'xmlns:xmpp': NS.BOSH
+          'xmlns:xmpp': NS.BOSH,
         });
       }
       delete this.connection.data;
       this.connection.data = [];
-      this._requests.push(
-        new Request(
+      this.requests.push(
+        new BoshRequest(
           body.tree(),
-          this._onRequestStateChange.bind(this, this.connection.dataReceived.bind(this.connection)),
+          this.onRequestStateChange.bind(this, this.connection.dataReceived.bind(this.connection)),
           Number.parseInt(body.tree().getAttribute('rid'), 10)
         )
       );
-      this._throttledRequestHandler();
+      this.throttledRequestHandler();
     }
 
-    if (this._requests.length > 0) {
-      const firstReq = this._requests[0];
-      const time_elapsed = firstReq.age();
-      if (firstReq.dead && firstReq.timeDead > Math.floor(SECONDARY_TIMEOUT * this.wait)) {
-        this._throttledRequestHandler();
+    if (this.requests.length > 0) {
+      const firstReq = this.requests[0];
+      if (firstReq.dead && firstReq.timeDead > this.secondaryTimeout) {
+        this.throttledRequestHandler();
       }
-      if (time_elapsed > Math.floor(TIMEOUT * this.wait)) {
-        warn('Request ' + firstReq.id + ' timed out, over ' + Math.floor(TIMEOUT * this.wait) + ' seconds since last activity');
-        this._throttledRequestHandler();
-      }
-    }
-  }
-
-  /**
-   *
-   *  Returns the HTTP status code from a Strophe.Request
-   *
-   *  Parameters:
-   *    (Strophe.Request) req - The Strophe.Request instance.
-   *    (Integer) def - The default value that should be returned if no
-   *          status value was found.
-   */
-  static _getRequestStatus(req: Request, def?: number) {
-    let reqStatus;
-    if (req.xhr.readyState === 4) {
-      try {
-        reqStatus = req.xhr.status;
-      } catch (e) {
-        // ignore errors from undefined status attribute. Works
-        // around a browser bug
-        error("Caught an error while retrieving a request's status, " + 'reqStatus: ' + reqStatus);
+      if (firstReq.age > this.primaryTimeout) {
+        warn(
+          'Request ' +
+            firstReq.rid +
+            ' timed out, over ' +
+            this.primaryTimeout +
+            ' seconds since last activity'
+        );
+        this.throttledRequestHandler();
       }
     }
-    if (typeof reqStatus === 'undefined') {
-      reqStatus = typeof def === 'number' ? def : 0;
-    }
-    return reqStatus;
   }
 
   /**
@@ -464,11 +372,12 @@ export class Bosh implements ProtocolManager {
    *  succeed.
    *
    *  Parameters:
-   *    (Function) func - The handler for the request.
-   *    (Strophe.Request) req - The request that is changing readyState.
+   *
+   *    @param func - The handler for the request.
+   *    @param req - The request that is changing readyState.
    */
-  _onRequestStateChange(func: (req: Request) => void, req: Request) {
-    debug('request id ' + req.id + '.' + req.sends + ' state changed to ' + req.xhr.readyState);
+  onRequestStateChange(func: (req: BoshRequest) => void, req: BoshRequest): void {
+    debug('request id ' + req.rid + '.' + req.sends + ' state changed to ' + req.xhr.readyState);
     if (req.abort) {
       req.abort = false;
       return;
@@ -477,22 +386,22 @@ export class Bosh implements ProtocolManager {
       // The request is not yet complete
       return;
     }
-    const reqStatus = Bosh._getRequestStatus(req);
+    const reqStatus = req.getRequestStatus();
     this.lastResponseHeaders = req.xhr.getAllResponseHeaders();
     if (this.connection.disconnecting && reqStatus >= 400) {
       // TODO: Check if hit error is necessary, error count for escalating error was 5
       return;
     }
 
-    const reqIs0 = this._requests[0] === req;
-    const reqIs1 = this._requests[1] === req;
+    const reqIs0 = this.requests[0] === req;
+    const reqIs1 = this.requests[1] === req;
 
     const valid_request = reqStatus > 0 && reqStatus < 500;
     const too_many_retries = req.sends > this.connection.maxRetries;
     if (valid_request || too_many_retries) {
       // remove from internal queue
-      this._removeRequest(req);
-      debug('request id ' + req.id + ' should now be removed');
+      this.removeRequest(req);
+      debug('request id ' + req.rid + ' should now be removed');
     }
 
     if (reqStatus === 200) {
@@ -501,26 +410,30 @@ export class Bosh implements ProtocolManager {
       // 1 is over SECONDARY_TIMEOUT seconds old, we need to
       // restart the other - both will be in the first spot, as the
       // completed request has been removed from the queue already
-      if (reqIs1 || (reqIs0 && this._requests.length > 0 && this._requests[0].age() > Math.floor(SECONDARY_TIMEOUT * this.wait))) {
-        this._restartRequest(0);
+      if (
+        reqIs1 ||
+        (reqIs0 &&
+          this.requests.length > 0 &&
+          this.requests[0].age > Math.floor(SECONDARY_TIMEOUT * this.wait))
+      ) {
+        this.restartRequest(0);
       }
-      this.connection.nextValidRid(Number(req.rid) + 1);
-      debug('request id ' + req.id + '.' + req.sends + ' got 200');
+      debug('request id ' + req.rid + '.' + req.sends + ' got 200');
       func(req); // call handler
     } else if (reqStatus === 0 || (reqStatus >= 400 && reqStatus < 600)) {
       // request failed
-      error('request id ' + req.id + '.' + req.sends + ' error ' + reqStatus + ' happened');
+      error('request id ' + req.rid + '.' + req.sends + ' error ' + reqStatus + ' happened');
       // TODO: Check if hit error is necessary, error count for escalating error was 5
       if (reqStatus >= 400 && reqStatus < 500) {
         this.connection.changeConnectStatus(Status.DISCONNECTING, null);
         this.connection.doDisconnect();
       }
     } else {
-      error('request id ' + req.id + '.' + req.sends + ' error ' + reqStatus + ' happened');
+      error('request id ' + req.rid + '.' + req.sends + ' error ' + reqStatus + ' happened');
     }
 
     if (!valid_request && !too_many_retries) {
-      this._throttledRequestHandler();
+      this.throttledRequestHandler();
     } else if (too_many_retries && !this.connection.connected) {
       this.connection.changeConnectStatus(Status.CONNFAIL, 'giving-up');
     }
@@ -529,131 +442,79 @@ export class Bosh implements ProtocolManager {
   /**
    *  function to process a request in the queue.
    *
-   *  This function takes requests off the queue and sends them and
-   *  restarts dead requests.
+   *  This function takes requests off the queue and sends them and restarts dead requests.
    *
    *  Parameters:
-   *    (Integer) i - The index of the request in the queue.
+   *
+   *   @param i - The index of the request in the queue.
    */
-  _processRequest(i: number) {
-    let req = this._requests[i];
-    const reqStatus = Bosh._getRequestStatus(req, -1);
-
+  processRequest(i: number): void {
     // make sure we limit the number of retries
-    if (req.sends > this.connection.maxRetries) {
+    if (this.requests[i].sends > this.connection.maxRetries) {
       this.connection.onDisconnectTimeout();
       return;
     }
-    const time_elapsed = req.age();
-    const primary_timeout = !isNaN(time_elapsed) && time_elapsed > Math.floor(TIMEOUT * this.wait);
-    const secondary_timeout = req.dead !== null && req.timeDead > Math.floor(SECONDARY_TIMEOUT * this.wait);
-    const server_error = req.xhr.readyState === 4 && (reqStatus < 1 || reqStatus >= 500);
+
+    this.requests[i] = this.ensureAliveRequest(this.requests[i]);
+
+    this.requests[i].process(i, this.connection, this.primaryTimeout);
+  }
+
+  private ensureAliveRequest(request: BoshRequest): BoshRequest {
+    const reqStatus = request.getRequestStatus();
+    const primary_timeout = !isNaN(request.age) && request.age > this.primaryTimeout;
+    const secondary_timeout =
+      request.dead && request.timeDead > Math.floor(SECONDARY_TIMEOUT * this.wait);
+    const server_error = request.xhr.readyState === 4 && (reqStatus < 1 || reqStatus >= 500);
+
+    if (secondary_timeout) {
+      error(`Request ${this.rid} timed out (secondary), restarting`);
+    }
 
     if (primary_timeout || secondary_timeout || server_error) {
-      if (secondary_timeout) {
-        error(`Request ${this._requests[i].id} timed out (secondary), restarting`);
-      }
-      req.abort = true;
-      req.xhr.abort();
+      request.abort = true;
+      request.xhr.abort();
       // setting to null fails on IE6, so set to empty function
-      req.xhr.onreadystatechange = () => {};
-      this._requests[i] = new Request(req.xmlData, req.origFunc, req.rid, req.sends);
-      req = this._requests[i];
+      request.xhr.onreadystatechange = () => {};
+      const req = new BoshRequest(request.xmlData, request.func, this.rid);
+      req.sends = request.sends;
+      return req;
     }
 
-    if (req.xhr.readyState === 0) {
-      debug('request id ' + req.id + '.' + req.sends + ' posting');
-
-      try {
-        const content_type = this.connection.options.contentType || 'text/xml; charset=utf-8';
-        req.xhr.open('POST', this.connection.service, !this.connection.options.sync);
-        if (typeof req.xhr.setRequestHeader !== 'undefined') {
-          // IE9 doesn't have setRequestHeader
-          req.xhr.setRequestHeader('Content-Type', content_type);
-        }
-        if (this.connection.options.withCredentials) {
-          req.xhr.withCredentials = true;
-        }
-      } catch (e2) {
-        error('XHR open failed: ' + e2.toString());
-        if (!this.connection.connected) {
-          this.connection.changeConnectStatus(Status.CONNFAIL, 'bad-service');
-        }
-        this.connection.disconnect();
-        return;
-      }
-
-      // Fires the XHR request -- may be invoked immediately
-      // or on a gradually expanding retry window for reconnects
-      const sendFunc = () => {
-        req.date = new Date();
-        if (this.connection.options.customHeaders) {
-          const headers = this.connection.options.customHeaders;
-          for (const header in headers) {
-            if (Object.prototype.hasOwnProperty.call(headers, header)) {
-              req.xhr.setRequestHeader(header, headers[header]);
-            }
-          }
-        }
-        req.xhr.send(req.data);
-      };
-
-      // Implement progressive backoff for reconnects --
-      // First retry (send === 1) should also be instantaneous
-      if (req.sends > 1) {
-        // Using a cube of the retry number creates a nicely
-        // expanding retry window
-        const backoff = Math.min(Math.floor(TIMEOUT * this.wait), Math.pow(req.sends, 3)) * 1000;
-        setTimeout(function () {
-          // XXX: setTimeout should be called only with function expressions (23974bc1)
-          sendFunc();
-        }, backoff);
-      } else {
-        sendFunc();
-      }
-
-      req.sends++;
-
-      if (req.xmlData.nodeName === this.strip && req.xmlData.childNodes.length) {
-        this.connection.xmlOutput(req.xmlData.childNodes[0]);
-      } else {
-        this.connection.xmlOutput(req.xmlData);
-      }
-    } else {
-      debug('_processRequest: ' + (i === 0 ? 'first' : 'second') + ' request has readyState of ' + req.xhr.readyState);
-    }
+    return request;
   }
 
   /**
    *  function to remove a request from the queue.
    *
    *  Parameters:
-   *    (Strophe.Request) req - The request to remove.
+   *
+   *    @param req - The request to remove.
    */
-  _removeRequest(req: Request) {
+  removeRequest(req: BoshRequest): void {
     debug('removing request');
-    for (let i = this._requests.length - 1; i >= 0; i--) {
-      if (req === this._requests[i]) {
-        this._requests.splice(i, 1);
-      }
+    const i = this.requests.indexOf(req);
+    if (i === -1) {
+      return;
     }
+    this.requests.splice(i, 1);
+
     // IE6 fails on setting to null, so set to empty function
     req.xhr.onreadystatechange = () => {};
-    this._throttledRequestHandler();
+    this.throttledRequestHandler();
   }
 
   /**
    *  function to restart a request that is presumed dead.
    *
    *  Parameters:
-   *    (Integer) i - The index of the request in the queue.
+   *
+   *    @param i - The index of the request in the queue.
    */
-  _restartRequest(i: number) {
-    const req = this._requests[i];
-    if (req.dead === null) {
-      req.dead = new Date();
-    }
-    this._processRequest(i);
+  restartRequest(i: number): void {
+    const req = this.requests[i];
+    req.dead = req.dead ?? new Date().getTime();
+    this.processRequest(i);
   }
 
   /**
@@ -668,7 +529,7 @@ export class Bosh implements ProtocolManager {
    *  Returns:
    *    The stanza that was passed.
    */
-  reqToData(req: Request): Element {
+  reqToData(req: BoshRequest): Element {
     try {
       return req.getResponse();
     } catch (e) {
@@ -681,45 +542,41 @@ export class Bosh implements ProtocolManager {
   }
 
   /**
-   *  function to send initial disconnect sequence.
+   *  Sends the initial disconnect sequence.
    *
    *  This is the first step in a graceful disconnect.  It sends
    *  the BOSH server a terminated body and includes an unavailable
    *  presence if authentication has completed.
    */
-  _sendTerminate(pres: Element) {
-    debug('_sendTerminate was called');
+  sendTerminate(pres: Element): void {
+    debug('sendTerminate was called');
     const body = this.buildBody().attrs({ type: 'terminate' });
     if (pres) {
       body.cnode(pres);
     }
-    const req = new Request(
+    const req = new BoshRequest(
       body.tree(),
-      this._onRequestStateChange.bind(this, this.connection.dataReceived.bind(this.connection)),
+      this.onRequestStateChange.bind(this, this.connection.dataReceived.bind(this.connection)),
       Number.parseInt(body.tree().getAttribute('rid'), 10)
     );
-    this._requests.push(req);
-    this._throttledRequestHandler();
+    this.requests.push(req);
+    this.throttledRequestHandler();
   }
 
   /**
-   *  part of the Connection.send function for BOSH
-   *
-   * Just triggers the RequestHandler to send the messages that are in the queue
+   * Triggers the RequestHandler to send the messages that are in the queue
    */
-  send() {
+  send(): void {
     clearTimeout(this.connection.idleTimeout);
-    this._throttledRequestHandler();
-    // @ts-ignore
-    this.connection.idleTimeout = setTimeout(() => this.connection._onIdle(), 100);
+    this.throttledRequestHandler();
+    this.connection.idleTimeout = setTimeout(() => this.connection.onIdle(), 100);
   }
 
   /**
-   *
    *  Send an xmpp:restart stanza.
    */
-  sendRestart() {
-    this._throttledRequestHandler();
+  sendRestart(): void {
+    this.throttledRequestHandler();
     clearTimeout(this.connection.idleTimeout);
   }
 
@@ -730,30 +587,35 @@ export class Bosh implements ProtocolManager {
    *  request ids overflow the connection window in the case that one
    *  request died.
    */
-  _throttledRequestHandler() {
-    if (!this._requests) {
+  throttledRequestHandler(): void {
+    if (!this.requests) {
       debug('_throttledRequestHandler called with ' + 'undefined requests');
     } else {
-      debug('_throttledRequestHandler called with ' + this._requests.length + ' requests');
+      debug('_throttledRequestHandler called with ' + this.requests.length + ' requests');
     }
 
-    if (!this._requests || this._requests.length === 0) {
+    if (!this.requests || this.requests.length === 0) {
       return;
     }
 
-    if (this._requests.length > 0) {
-      this._processRequest(0);
+    if (this.requests.length > 0) {
+      this.processRequest(0);
     }
 
-    if (this._requests.length > 1 && Math.abs(this._requests[0].rid - this._requests[1].rid) < this.limit) {
-      this._processRequest(1);
+    if (
+      this.requests.length > 1 &&
+      Math.abs(this.requests[0].rid - this.requests[1].rid) < this.limit
+    ) {
+      this.processRequest(1);
     }
   }
 
-  restoreBOSHSession(reconnecting: boolean): boolean {
+  restoreBOSHSession(): boolean {
     const jid = this.initBOSHSession();
     try {
-      this.restore(jid, async (status, condition) => this.connection.onConnectStatusChanged(status, condition, reconnecting));
+      this.restore(jid, async (status, condition) =>
+        this.connection.onConnectStatusChanged(status, condition)
+      );
       return true;
     } catch (e) {}
     return false;
@@ -761,38 +623,27 @@ export class Bosh implements ProtocolManager {
 
   initBOSHSession(): string {
     // new session from connection, this.jid keepalive
-    const jid = this.connection.jid ?? this.jid;
-    this.jid = this.connection.setUserJID(jid);
+    this.connection.jid = this.connection.jid ?? this.jid;
+    this.jid = this.connection.jid;
     return this.jid;
   }
 
-  startNewPreboundBOSHSession(reconnecting: boolean): void {
-    const xhr = new XMLHttpRequest();
-    xhr.open('GET', this.prebindUrl, true);
-    xhr.setRequestHeader('Accept', 'application/json, text/javascript');
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 400) {
-        const data = JSON.parse(xhr.responseText);
-        const jid = this.connection.setUserJID(data.jid);
-        this.attach(
-          jid,
-          data.sid,
-          data.rid,
-          (status, condition) => this.connection.onConnectStatusChanged(status, condition, reconnecting),
-          59
-        );
-      } else {
-        xhr.onerror(null);
-      }
-    };
-    xhr.onerror = () => {
+  async startNewPreboundBOSHSession(): Promise<void> {
+    try {
+      const { jid, sid, rid } = await BoshRequest.get<{ jid: string; sid: string; rid: number }>(
+        this.prebindUrl
+      );
+      this.connection.jid = jid;
+      this.attach(jid, sid, rid, (status, condition) =>
+        this.connection.onConnectStatusChanged(status, condition)
+      );
+    } catch (e) {
       this.connection.clearSession();
       this.destroySubject.next();
       /**
        * Triggered when fetching prebind tokens failed
        */
       this.notAbleToResumeBOSHSessionSubject.next();
-    };
-    xhr.send();
+    }
   }
 }

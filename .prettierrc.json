@@ -1,7 +1,7 @@
 {
   "singleQuote": true,
-  "trailingComma": "none",
-  "printWidth": 140,
+  "trailingComma": "es5",
+  "printWidth": 100,
   "overrides": [
     {
       "files": ["*.json", "*.md"],

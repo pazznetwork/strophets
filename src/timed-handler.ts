@@ -12,7 +12,6 @@
  */
 export class TimedHandler {
   lastCalled: number;
-  user: boolean;
 
   /**
    *  Create and initialize a new Strophe.TimedHandler object.
@@ -23,13 +22,17 @@ export class TimedHandler {
    *      handler is called.
    *    @param handler - The callback to run when the handler fires.  This
    *      function should take no arguments.
+   *    @param user - is this a user created handler
    *
    *  Returns:
    *    @returns A new Strophe.TimedHandler object.
    */
-  constructor(readonly period: number, private readonly handler: () => boolean) {
+  constructor(
+    readonly period: number,
+    private readonly handler: () => boolean,
+    readonly user = true
+  ) {
     this.lastCalled = new Date().getTime();
-    this.user = true;
   }
 
   /**

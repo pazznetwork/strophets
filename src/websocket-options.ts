@@ -1,4 +1,4 @@
-import { SASLMechanism } from './sasl';
+import { SASLMechanism } from './sasl-mechanism';
 
 export interface WebsocketOptions {
   /**

@@ -1,6 +1,6 @@
-import { SASLMechanismBase } from './sasl';
-import { Connection } from './connection';
 import { clientChallenge, scramResponse } from './scram';
+import { SASLMechanismBase } from './sasl-mechanism-base';
+import { Sasl } from './sasl';
 
 export class SASLSHA256 extends SASLMechanismBase {
   /** PrivateConstructor: SASLSHA256
@@ -10,15 +10,15 @@ export class SASLSHA256 extends SASLMechanismBase {
     super('SCRAM-SHA-256', true, 70);
   }
 
-  test(connection: Connection): boolean {
-    return connection.authcid !== null;
+  test(sasl: Sasl): boolean {
+    return sasl.authcid !== null;
   }
 
-  async onChallenge(connection: Connection, challenge?: string): Promise<string> {
-    return (await scramResponse(connection, challenge, 'SHA-256', 256)).toString();
+  async onChallenge(sasl: Sasl, challenge?: string): Promise<string> {
+    return (await scramResponse(sasl, challenge, 'SHA-256', 256)).toString();
   }
 
-  async clientChallenge(connection: Connection, test_cnonce: string): Promise<string> {
-    return clientChallenge(connection, test_cnonce);
+  async clientChallenge(sasl: Sasl, testCnonce: string): Promise<string> {
+    return Promise.resolve(clientChallenge(sasl, testCnonce));
   }
 }

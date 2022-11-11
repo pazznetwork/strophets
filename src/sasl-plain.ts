@@ -1,6 +1,6 @@
-import { SASLMechanismBase } from './sasl';
-import { Connection } from './connection';
+import { Sasl } from './sasl';
 import { utf16to8 } from './utils';
+import { SASLMechanismBase } from './sasl-mechanism-base';
 
 export class SASLPlain extends SASLMechanismBase {
   /** PrivateConstructor: SASLPlain
@@ -10,12 +10,12 @@ export class SASLPlain extends SASLMechanismBase {
     super('PLAIN', true, 50);
   }
 
-  test(connection: Connection): boolean {
-    return connection.authcid !== null;
+  test(sasl: Sasl): boolean {
+    return sasl.authcid !== null;
   }
 
-  async onChallenge(connection: Connection): Promise<string> {
-    const { authcid, authzid, domain, pass } = connection;
+  onChallenge(sasl: Sasl, domain: string): Promise<string> {
+    const { authcid, authzid, pass } = sasl;
     if (!domain) {
       throw new Error('SASLPlain onChallenge: domain is not defined!');
     }
@@ -26,6 +26,6 @@ export class SASLPlain extends SASLMechanismBase {
     auth_str = auth_str + authcid;
     auth_str = auth_str + '\u0000';
     auth_str = auth_str + pass;
-    return utf16to8(auth_str);
+    return Promise.resolve(utf16to8(auth_str));
   }
 }

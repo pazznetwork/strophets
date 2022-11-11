@@ -4,20 +4,39 @@ import { Status } from './status';
 import { Builder } from './builder';
 import { addCookies } from './utils';
 import { NS } from './namespace';
-import { forEachChild, getBareJidFromJid, getDomainFromJid, getNodeFromJid, getResourceFromJid, getText } from './xml';
+import {
+  forEachChild,
+  getBareJidFromJid,
+  getDomainFromJid,
+  getNodeFromJid,
+  getResourceFromJid,
+  getText,
+} from './xml';
 import { ErrorCondition, handleError } from './error';
 import { $iq, $pres } from './builder-helper';
 import { debug, info, log, LogLevel, warn } from './log';
 import { Bosh } from './bosh';
 import { StropheWebsocket } from './websocket';
 import { ProtocolManager } from './protocol-manager';
-import { debounceTime, filter, firstValueFrom, from as fromRxjs, Observable, share, shareReplay, startWith, Subject } from 'rxjs';
+import {
+  debounceTime,
+  filter,
+  firstValueFrom,
+  from as fromRxjs,
+  Observable,
+  share,
+  shareReplay,
+  startWith,
+  Subject,
+} from 'rxjs';
 import { Matcher, MatcherConfig } from './matcher';
 import { ConnectionOptions } from './connection-options';
 import { AuthenticationMode } from './authentication-mode';
 import { Credentials } from './credentials';
 import { Sasl } from './sasl';
 import { HandlerService } from './handler-service';
+import { register } from './extensions/register';
+import { BoshRequest } from './bosh-request';
 
 /**
  *  XMPP Connection manager.
@@ -41,20 +60,12 @@ import { HandlerService } from './handler-service';
  *  To send data to the connection, use send().
  */
 export class Connection {
-  /**
-   * variable that keeps track of the request ids for connections.
-   */
-  private static requestId = 0;
-
-  /**
-   * The connected JID.
-   */
-  jid = '';
+  private static instance: Connection;
 
   private readonly userJidSubject = new Subject<string>();
-  private readonly willReconnectSubject = new Subject<void>();
-
   userJid$: Observable<string> = this.userJidSubject.pipe(share());
+
+  private readonly willReconnectSubject = new Subject<void>();
   willReconnect$: Observable<void> = this.willReconnectSubject.pipe(share());
 
   /**
@@ -73,31 +84,32 @@ export class Connection {
 
   status: Status;
 
-  /** parameter: callback
+  /**
    *  Set on connection.
    *  Callback after connecting.
    */
-  connectCallback: (status: number, condition: string, elem: Element) => unknown;
+  callback: (status: number, condition: string, elem: Element) => Promise<void>;
 
-  disconnection_timeout: number;
+  disconnectionTimeout: number;
 
   private stanzasInSubject = new Subject<Element>();
   stanzasIn$ = this.stanzasInSubject.pipe(share());
   private stanzasOutSubject = new Subject<Element>();
   stanzasOut$ = this.stanzasOutSubject.pipe(share());
 
-  protected readonly stateSubject = new Subject<Status>();
-  readonly state$ = this.stateSubject.pipe(startWith(Status.DISCONNECTED), shareReplay(1));
-
   private afterResourceBindingSubject = new Subject<void>();
-  private reconnectedSubject = new Subject<void>();
+
+  /**
+   * Triggered after the connection has been established
+   */
   private connectedSubject = new Subject<void>();
   private disconnectedSubject = new Subject<void>();
 
-  private reconnecting = false;
-
-  private readonly connectionStatusSubject = new Subject<{ status: Status; message: string }>();
-  readonly connectionStatus$ = this.connectionStatusSubject.asObservable();
+  private readonly connectionStatusSubject = new Subject<{ status: Status; message?: string }>();
+  readonly connectionStatus$ = this.connectionStatusSubject.pipe(
+    startWith({ status: Status.DISCONNECTED }),
+    shareReplay({ bufferSize: 1, refCount: true })
+  );
 
   private session: Record<string, unknown>;
   private bareJid: string;
@@ -108,33 +120,30 @@ export class Connection {
    */
   protocolManager: ProtocolManager;
 
-  idleTimeout: number;
+  idleTimeout: ReturnType<typeof setTimeout>;
   private disconnectTimeout: TimedHandler;
   data: Element[];
-  private uniqueId: number;
 
   readonly sasl = new Sasl(this);
 
   readonly handlerService = new HandlerService(this);
 
-  get handlePreBind(): boolean {
-    return this.authenticationMode === AuthenticationMode.PREBIND && !!this.prebindUrl;
-  }
+  /**
+   * The connected JID.
+   */
+  private backingJid = '';
 
   /**
    * Stores the passed in JID for the current user, potentially creating a
    * resource if the JID is bare.
-   *
-   * @emits userJidSubject
-   * @param {string} jid
    */
-  setUserJID(jid: string): string {
-    /**
-     * Triggered whenever the user's JID has been updated
-     */
-    this.jid = jid;
-    this.userJidSubject.next(this.jid);
-    return this.jid;
+  set jid(value: string) {
+    this.backingJid = value;
+    this.userJidSubject.next(this.backingJid);
+  }
+
+  get jid(): string {
+    return this.backingJid;
   }
 
   /**
@@ -172,11 +181,10 @@ export class Connection {
     readonly credentialsUrl?: string,
     readonly password?: string
   ) {
-    this.setProtocol();
+    this.protocolManager = this.createProtocolManager();
     /* stream:features */
     this.features = null;
 
-    this.idleTimeout = null;
     this.disconnectTimeout = null;
 
     this.authenticated = false;
@@ -186,14 +194,13 @@ export class Connection {
     this.paused = false;
 
     this.data = [];
-    this.uniqueId = 0;
 
     // Max retries before disconnecting
     this.maxRetries = 5;
 
     // Call onIdle callback every 1/10th of a second
     // @ts-ignore
-    this.idleTimeout = setTimeout(() => this._onIdle(), 100);
+    this.idleTimeout = setTimeout(() => this.onIdle(), 100);
 
     addCookies(this.options.cookies);
 
@@ -206,15 +213,18 @@ export class Connection {
   }
 
   /**
-   *  Select protocol based on this.options or this.service
+   * Select protocol based on the connections options or service
    */
-  setProtocol(): void {
-    const proto = this.options.protocol || '';
-    if (this.service.includes('ws:') || this.service.includes('wss:') || proto.includes('ws')) {
-      this.protocolManager = new StropheWebsocket(this, this.stanzasInSubject);
-    } else {
-      this.protocolManager = new Bosh(this, this.prebindUrl);
+  createProtocolManager(): ProtocolManager {
+    if (
+      this.service.includes('ws:') ||
+      this.service.includes('wss:') ||
+      this.options?.protocol?.includes('ws')
+    ) {
+      return new StropheWebsocket(this, this.stanzasInSubject);
     }
+
+    return new Bosh(this, this.prebindUrl);
   }
 
   /**
@@ -237,7 +247,6 @@ export class Connection {
     this.disconnecting = false;
 
     this.data = [];
-    this.uniqueId = 0;
   }
 
   /**
@@ -319,14 +328,7 @@ export class Connection {
    *      or a full JID.  If a node is not supplied, SASL ANONYMOUS
    *      authentication will be attempted.
    *    @param pass - The user's password.
-   *    @param callback - The connect callback function.
-   *    @param wait - The optional HTTPBIND wait value.  This is the
-   *      time the server will wait before returning an empty result for
-   *      a request.  The default setting of 60 seconds is recommended.
-   *    @param hold - The optional HTTPBIND hold value.  This is the
-   *      number of connections the server will hold at one time.  This
-   *      should almost always be set to 1 (the default).
-   *    @param route - The optional route value.
+   *    @param callback - connect callback function.
    *    @param authcid - The optional alternative authentication identity
    *      (username) if intending to impersonate another user.
    *      When using the SASL-EXTERNAL authentication mechanism, for example
@@ -343,33 +345,32 @@ export class Connection {
   connect(
     jid?: string,
     pass?: string,
-    callback?: (status: Status, condition: string, elem: Element) => unknown,
-    wait = 59,
-    hold?: number,
-    route?: string,
+    callback?: (status: Status, condition: string, elem: Element) => Promise<void>,
     authcid?: string,
     disconnection_timeout?: number
   ): void {
     if (!this.boshServiceUrl && !this.websocketUrl) {
-      throw new Error('You must supply a value for either the bosh_service_url or websocket_url or both.');
+      throw new Error(
+        'You must supply a value for either the bosh_service_url or websocket_url or both.'
+      );
     }
 
     this.jid = jid;
 
     this.sasl.setVariables(this.jid, pass, authcid);
 
-    this.connectCallback = callback;
+    this.callback = callback;
     this.disconnecting = false;
     this.connected = false;
     this.authenticated = false;
-    this.disconnection_timeout = disconnection_timeout;
+    this.disconnectionTimeout = disconnection_timeout;
 
     // parse jid for domain
     this.domain = getDomainFromJid(this.jid);
 
     this.changeConnectStatus(Status.CONNECTING, null);
 
-    this.protocolManager.connect(wait, hold, route);
+    this.protocolManager.connect();
   }
 
   /**
@@ -387,31 +388,21 @@ export class Connection {
    *    @param rid - The current RID of the BOSH session.  This RID
    *      will be used by the next request.
    *    @param callback The connect callback function.
-   *    @param wait - The optional HTTPBIND wait value.  This is the
-   *      time the server will wait before returning an empty result for
-   *      a request.  The default setting of 60 seconds is recommended.
-   *      Other settings will require tweaks to the TIMEOUT value.
-   *    @param hold - The optional HTTPBIND hold value.  This is the
-   *      number of connections the server will hold at one time.  This
-   *      should almost always be set to 1 (the default).
-   *    @param wind - The optional HTTBIND window value.  This is the
-   *      allowed range of request ids that are valid.  The default is 5.
    */
   attach(
     jid: string,
     sid: string,
     rid: string,
-    callback?: (status: Status, condition: string, elem: Element) => unknown,
-    wait?: number,
-    hold?: number,
-    wind?: number
+    callback?: (status: Status, condition: string, elem: Element) => unknown
   ): void {
     // @ts-ignore
     if (this.protocolManager.attach) {
       // @ts-ignore
-      return this.protocolManager.attach(jid, sid, rid, callback, wait, hold, wind);
+      return this.protocolManager.attach(jid, sid, rid, callback);
     } else {
-      const stropheError = new Error('The "attach" method is not available for your connection protocol');
+      const stropheError = new Error(
+        'The "attach" method is not available for your connection protocol'
+      );
       stropheError.name = 'StropheSessionError';
       throw stropheError;
     }
@@ -433,20 +424,14 @@ export class Connection {
    *
    *    @param jid - The user’s JID.  This may be a bare JID or a full JID.
    *    @param callback - connect callback function.
-   *    @param wait - The optional HTTPBIND wait value.
-   *      This is the time the server will wait before returning an empty result for a request.
-   *      The default setting of 60 seconds is recommended.
-   *    @param hold - The optional HTTPBIND hold value.
-   *      This is the number of connections the server will hold at one time.
-   *      This should almost always be set to 1 (the default).
-   *    @param [wind=5] wind - The optional HTTBIND window value.
-   *      This is the allowed range of request ids that are valid.
    */
-  restore(jid?: string, callback?: (status: Status, condition: string) => unknown, wait?: number, hold?: number, wind?: number): void {
+  restore(jid?: string, callback?: (status: Status, condition: string) => Promise<void>): void {
     if (this.protocolManager instanceof Bosh) {
-      this.protocolManager.restore(jid, callback, wait, hold, wind);
+      this.protocolManager.restore(jid, callback);
     } else {
-      const stropheError = new Error('The "restore" method can only be used with a BOSH connection.');
+      const stropheError = new Error(
+        'The "restore" method can only be used with a BOSH connection.'
+      );
       stropheError.name = 'StropheSessionError';
       throw stropheError;
     }
@@ -499,22 +484,6 @@ export class Connection {
   }
 
   /**
-   *  User overrideable function that receives the new valid rid.
-   *
-   *  The default function does nothing. User code can override this with
-   *  > Connection.nextValidRid = function (rid) {
-   *  >    (user code)
-   *  > };
-   *
-   *  Parameters:
-   *
-   *    @param  _rid - The next valid rid
-   */
-  nextValidRid(_rid: number): void {
-    return;
-  }
-
-  /**
    *  Send a stanza.
    *
    *  This function is called to push data onto the send queue to
@@ -553,7 +522,7 @@ export class Connection {
     // cancel the pending idle period and run the idle function
     // immediately
     clearTimeout(this.idleTimeout);
-    this._onIdle();
+    this.onIdle();
   }
 
   /**
@@ -643,7 +612,12 @@ export class Connection {
    *  Returns:
    *    @returns The id used to send the IQ.
    */
-  sendIQ(el: Element | Builder, callback?: (stanza: Element) => unknown, errback?: (stanza: Element) => unknown, timeout?: number): string {
+  sendIQ(
+    el: Element | Builder,
+    callback?: (stanza: Element) => unknown,
+    errback?: (stanza: Element) => unknown,
+    timeout?: number
+  ): string {
     const elem = el instanceof Element ? el : el.tree();
 
     let id = elem.getAttribute('id');
@@ -723,29 +697,35 @@ export class Connection {
    */
   disconnect(reason?: string): void {
     this.changeConnectStatus(Status.DISCONNECTING, reason);
-    if (reason) {
-      warn('Disconnect was called because: ' + reason);
-    } else {
-      info('Disconnect was called');
-    }
-    if (this.connected) {
-      let pres;
-      this.disconnecting = true;
-      if (this.authenticated) {
-        pres = $pres({
-          xmlns: NS.CLIENT,
-          type: 'unavailable'
-        });
-      }
-      // setup timeout handler
-      this.disconnectTimeout = this.handlerService.addSysTimedHandler(this.disconnection_timeout, () => this.onDisconnectTimeout());
-      // @ts-ignore
-      this.protocolManager.disconnect(pres);
-    } else {
+    info('Disconnect was called; reason=' + reason);
+    if (!this.connected) {
       warn('Disconnect was called before Strophe connected to the server');
-      this.protocolManager.abortAllRequests();
+      if (this.protocolManager instanceof Bosh) {
+        this.protocolManager.abortAllRequests();
+      }
       this.doDisconnect();
+      return;
     }
+
+    // TODO: move into a finally in the connections
+    // setup timeout handler
+    const timeOut = this.disconnectionTimeout ?? 3000;
+    this.disconnectTimeout = this.handlerService.addSysTimedHandler(timeOut, () =>
+      this.onDisconnectTimeout()
+    );
+    this.disconnecting = true;
+
+    if (!this.authenticated) {
+      this.protocolManager.disconnect();
+      return;
+    }
+
+    this.protocolManager.disconnect(
+      $pres({
+        xmlns: NS.CLIENT,
+        type: 'unavailable',
+      }).tree()
+    );
   }
 
   /**
@@ -753,13 +733,11 @@ export class Connection {
    *  This is the last piece of the disconnection logic.  This resets the
    *  connection and alerts the user's connection callback.
    */
-  doDisconnect(reason?: string) {
-    if (typeof this.idleTimeout === 'number') {
-      clearTimeout(this.idleTimeout);
-    }
+  doDisconnect(reason?: string): void {
+    clearTimeout(this.idleTimeout);
 
     // Cancel Disconnect Timeout
-    if (this.disconnectTimeout !== null) {
+    if (this.disconnectTimeout != null) {
       this.handlerService.deleteTimedHandler(this.disconnectTimeout);
       this.disconnectTimeout = null;
     }
@@ -793,16 +771,19 @@ export class Connection {
    *
    */
   async authenticate(matched: SASLMechanism[]): Promise<void> {
-    if (!(await this.sasl.attemptSASLAuth(matched))) {
-      this.attemptLegacyAuth();
+    const saslAuth = await this.sasl.attemptSASLAuth(matched);
+    if (saslAuth) {
+      return;
     }
+
+    this.attemptLegacyAuth();
   }
 
   /**
    *
    *  Attempt legacy (i.e. non-SASL) authentication.
    */
-  attemptLegacyAuth() {
+  attemptLegacyAuth(): void {
     if (getNodeFromJid(this.jid) === null) {
       // we don't have a node, which is required for non-anonymous
       // client connections
@@ -811,12 +792,18 @@ export class Connection {
     } else {
       // Fall back to legacy authentication
       this.changeConnectStatus(Status.AUTHENTICATING, null);
-      this.handlerService.addSysHandler((elem) => this._onLegacyAuthIQResult(elem), null, null, null, '_auth_1');
+      this.handlerService.addSysHandler(
+        (elem) => this.onLegacyAuthIQResult(elem),
+        null,
+        null,
+        null,
+        '_auth_1'
+      );
       this.send(
         $iq({
           type: 'get',
           to: this.domain,
-          id: '_auth_1'
+          id: '_auth_1',
         })
           .c('query', { xmlns: NS.AUTH })
           .c('username', {})
@@ -834,13 +821,11 @@ export class Connection {
    *  sends it, creating a handler (calling back to _auth2_cb()) to
    *  handle the result
    *
-   *  Parameters:
-   *    (XMLElement) elem - The stanza that triggered the callback.
+   *   @param _elem - The stanza that triggered the callback.
    *
-   *  Returns:
-   *    false to remove the handler.
+   *   @returns false to remove the handler.
    */
-  _onLegacyAuthIQResult(_elem: Element) {
+  onLegacyAuthIQResult(_elem: Element): false {
     // build plaintext auth iq
     const iq = $iq({ type: 'set', id: '_auth_2' })
       .c('query', { xmlns: NS.AUTH })
@@ -858,7 +843,13 @@ export class Connection {
     }
     iq.up().c('resource', {}).t(getResourceFromJid(this.jid));
 
-    this.handlerService.addSysHandler((element) => this._auth2_cb(element), null, null, null, '_auth_2');
+    this.handlerService.addSysHandler(
+      (element) => this.auth2Callback(element),
+      null,
+      null,
+      null,
+      '_auth_2'
+    );
     this.send(iq.tree());
     return false;
   }
@@ -881,26 +872,36 @@ export class Connection {
       return;
     }
 
-    this.handlerService.addSysHandler((element) => this._onResourceBindResultIQ(element), null, null, null, '_bind_auth_2');
+    this.handlerService.addSysHandler(
+      (element) => this.onResourceBindResultIQ(element),
+      null,
+      null,
+      null,
+      '_bind_auth_2'
+    );
 
     const resource = getResourceFromJid(this.jid);
     if (resource) {
-      this.send($iq({ type: 'set', id: '_bind_auth_2' }).c('bind', { xmlns: NS.BIND }).c('resource', {}).t(resource).tree());
+      this.send(
+        $iq({ type: 'set', id: '_bind_auth_2' })
+          .c('bind', { xmlns: NS.BIND })
+          .c('resource', {})
+          .t(resource)
+          .tree()
+      );
     } else {
       this.send($iq({ type: 'set', id: '_bind_auth_2' }).c('bind', { xmlns: NS.BIND }).tree());
     }
   }
 
   /**
-   *  _Private_ handler for binding result and session start.
+   *  Handler for binding result and session start.
    *
-   *  Parameters:
-   *    (XMLElement) elem - The matching stanza.
+   *    @param elem - The matching stanza.
    *
-   *  Returns:
-   *    false to remove the handler.
+   *    @returns false to remove the handler.
    */
-  _onResourceBindResultIQ(elem: Element) {
+  onResourceBindResultIQ(elem: Element): boolean {
     if (elem.getAttribute('type') === 'error') {
       warn('Resource binding failed.');
       const conflict = elem.getElementsByTagName('conflict');
@@ -919,7 +920,7 @@ export class Connection {
         this.authenticated = true;
         this.jid = getText(jidNode[0]);
         if (this.sasl.doSession) {
-          this._establishSession();
+          this.establishSession();
         } else {
           this.changeConnectStatus(Status.CONNECTED, null);
         }
@@ -940,20 +941,28 @@ export class Connection {
    *  Note: The protocol for session establishment has been determined as
    *  unnecessary and removed in RFC-6121.
    */
-  _establishSession() {
+  establishSession(): void {
     if (!this.sasl.doSession) {
       throw new Error(
-        `Strophe.Connection.prototype._establishSession ` + `called but apparently ${NS.SESSION} wasn't advertised by the server`
+        `Strophe.Connection.prototype._establishSession ` +
+          `called but apparently ${NS.SESSION} wasn't advertised by the server`
       );
     }
-    this.handlerService.addSysHandler((element) => this._onSessionResultIQ(element), null, null, null, '_session_auth_2');
+    this.handlerService.addSysHandler(
+      (element) => this.onSessionResultIQ(element),
+      null,
+      null,
+      null,
+      '_session_auth_2'
+    );
 
-    this.send($iq({ type: 'set', id: '_session_auth_2' }).c('session', { xmlns: NS.SESSION }).tree());
+    this.send(
+      $iq({ type: 'set', id: '_session_auth_2' }).c('session', { xmlns: NS.SESSION }).tree()
+    );
   }
 
   /**
-   *  _Private_ handler for the server's IQ response to a client's session
-   *  request.
+   *  Handler for the server's IQ response to a client's session request.
    *
    *  This sets Connection.authenticated to true on success, which
    *  starts the processing of user handlers.
@@ -963,13 +972,11 @@ export class Connection {
    *  Note: The protocol for session establishment has been determined as
    *  unnecessary and removed in RFC-6121.
    *
-   *  Parameters:
-   *    (XMLElement) elem - The matching stanza.
+   * @param elem - The matching stanza.
    *
-   *  Returns:
-   *    false to remove the handler.
+   * @returns false to remove the handler.
    */
-  _onSessionResultIQ(elem: Element) {
+  onSessionResultIQ(elem: Element): false {
     if (elem.getAttribute('type') === 'result') {
       this.authenticated = true;
       this.changeConnectStatus(Status.CONNECTED, null);
@@ -983,18 +990,14 @@ export class Connection {
   }
 
   /**
-   *  _Private_ handler to finish legacy authentication.
+   * Finish legacy authentication.
+   * This handler is called when the result from the jabber:iq:auth <iq/> stanza is returned.
    *
-   *  This handler is called when the result from the jabber:iq:auth
-   *  <iq/> stanza is returned.
+   * @param elem - The stanza that triggered the callback.
    *
-   *  Parameters:
-   *    (XMLElement) elem - The stanza that triggered the callback.
-   *
-   *  Returns:
-   *    false to remove the handler.
+   * @returns false to remove the handler.
    */
-  _auth2_cb(elem: Element) {
+  auth2Callback(elem: Element): false {
     if (elem.getAttribute('type') === 'result') {
       this.authenticated = true;
       this.changeConnectStatus(Status.CONNECTED, null);
@@ -1015,9 +1018,10 @@ export class Connection {
    *    false to remove the handler.
    */
   onDisconnectTimeout(): false {
-    debug('_onDisconnectTimeout was called');
     this.changeConnectStatus(Status.CONNTIMEOUT, null);
-    this.protocolManager.onDisconnectTimeout();
+    if (this.protocolManager instanceof Bosh) {
+      this.protocolManager.onDisconnectTimeout();
+    }
     // actually disconnect
     this.doDisconnect();
     return false;
@@ -1049,9 +1053,9 @@ export class Connection {
       }
     }
     // notify the user's callback
-    if (this.connectCallback) {
+    if (this.callback) {
       try {
-        this.connectCallback(status, condition, elem);
+        this.callback(status, condition, elem);
       } catch (e) {
         handleError(e);
         log(LogLevel.ERROR, `User connection callback caused an exception: ${e}`);
@@ -1071,19 +1075,21 @@ export class Connection {
    *
    *    @param req - The request that has data ready.
    */
-  dataReceived(req: Element): void {
-    const elem = this.protocolManager.reqToData(req as unknown as any);
-    if (elem === null) {
+  dataReceived(req: Element | BoshRequest): void {
+    let elem: Element;
+    if (this.protocolManager instanceof Bosh && req instanceof BoshRequest) {
+      elem = this.protocolManager.reqToData(req);
+    } else if (req instanceof Element) {
+      elem = req;
+    } else {
+      new Error('There should be no BoshRequest coming from a websocket connection');
+    }
+    if (elem == null) {
       return;
     }
 
-    if (elem.nodeName === this.protocolManager.strip && Array.isArray(elem.childNodes)) {
-      this.xmlInput(elem.childNodes[0]);
-      this.stanzasInSubject.next(elem.childNodes[0] as Element);
-    } else {
-      this.xmlInput(elem);
-      this.stanzasInSubject.next(elem);
-    }
+    this.xmlInput(elem);
+    this.stanzasInSubject.next(elem);
 
     this.handlerService.removeScheduledHandlers();
     this.handlerService.addScheduledHandlers();
@@ -1122,12 +1128,12 @@ export class Connection {
   }
 
   /**
-   *  _Private_ handler to process events during idle cycle.
+   *  handler to process events during idle cycle.
    *
    *  This handler is called every 100ms to fire timed handlers that
    *  are ready and keep poll requests going.
    */
-  _onIdle(): void {
+  onIdle(): void {
     this.handlerService.addTimedHandlersScheduledForAddition();
     this.handlerService.removeTimedHandlersScheduledForDeletion();
     this.handlerService.callReadyTimedHandlers(this.authenticated);
@@ -1135,16 +1141,14 @@ export class Connection {
     clearTimeout(this.idleTimeout);
     this.protocolManager.onIdle();
 
-    // reactivate the timer only if connected
-    if (this.connected) {
-      // @ts-ignore
-      this.idleTimeout = setTimeout(() => this._onIdle(), 100);
+    if (!this.connected) {
+      return;
     }
+    // reactivate the timer only if connected
+    this.idleTimeout = setTimeout(() => this.onIdle(), 100);
   }
 
   /**
-   *  _Private_ handler for initial connection request.
-   *
    *  This handler is used to process the initial connection request
    *  response from the BOSH server. It is used to set up authentication
    *  handlers and start the authentication process.
@@ -1152,20 +1156,20 @@ export class Connection {
    *  SASL authentication will be attempted if available, otherwise
    *  the code will fall back to legacy authentication.
    *
-   *  Parameters:
-   *
-   *    @param req - The current request.
-   *    @param _callback - low level (xmpp) connect callback function.
-   *      Useful for plugins with their own xmpp connect callback (when they
-   *      want to do something special).
+   *  @param requestElement - The current request.
    */
-  _connect_cb(req: Element, _callback: () => void) {
-    debug('_connect_cb was called');
+  async connectCallback(requestElement: Element | BoshRequest): Promise<void> {
     this.connected = true;
 
-    let bodyWrap: Element;
+    let wrappedBody: Element;
     try {
-      bodyWrap = this.protocolManager.reqToData(req as unknown as any);
+      if (this.protocolManager instanceof Bosh && requestElement instanceof BoshRequest) {
+        wrappedBody = this.protocolManager.reqToData(requestElement);
+      } else if (requestElement instanceof Element) {
+        wrappedBody = requestElement;
+      } else {
+        new Error('There should be no BoshRequest coming from a websocket connection');
+      }
     } catch (e) {
       if (e.name !== ErrorCondition.BAD_FORMAT) {
         throw e;
@@ -1173,45 +1177,36 @@ export class Connection {
       this.changeConnectStatus(Status.CONNFAIL, ErrorCondition.BAD_FORMAT);
       this.doDisconnect(ErrorCondition.BAD_FORMAT);
     }
-    if (!bodyWrap) {
+    if (!wrappedBody) {
       return;
     }
 
-    if (bodyWrap.nodeName === this.protocolManager.strip && bodyWrap.childNodes.length) {
-      this.xmlInput(bodyWrap.childNodes[0] as Element);
-    } else {
-      this.xmlInput(bodyWrap);
-    }
+    this.xmlInput(wrappedBody);
 
-    const conncheck = this.protocolManager.connectCb(bodyWrap);
-    if (conncheck === Status.CONNFAIL) {
+    const connectionCheck = this.protocolManager.connectCb(wrappedBody);
+
+    if (connectionCheck === Status.CONNFAIL) {
       return;
     }
 
-    // Check for the stream:features tag
-    let hasFeatures;
-    if (bodyWrap.getElementsByTagNameNS) {
-      hasFeatures = bodyWrap.getElementsByTagNameNS(NS.STREAM, 'features').length > 0;
-    } else {
-      hasFeatures = bodyWrap.getElementsByTagName('stream:features').length > 0 || bodyWrap.getElementsByTagName('features').length > 0;
-    }
+    const hasFeatures = wrappedBody.getElementsByTagNameNS(NS.STREAM, 'features').length > 0;
+
     if (!hasFeatures) {
-      this.protocolManager.noAuthReceived(_callback);
+      this.protocolManager.noAuthReceived();
       return;
     }
 
-    const matched = Array.from(bodyWrap.getElementsByTagName('mechanism'))
-      .map((m) => this.sasl.mechanisms[m.textContent])
+    const matched = Array.from(wrappedBody.getElementsByTagName('mechanism'))
+      .map((m) => this.sasl.mechanism[m.textContent])
       .filter((m) => m);
 
-    if (matched.length !== 0 && this.do_authentication !== false) {
-      this.authenticate(matched).then(_callback);
+    if (matched.length > 0 && this.do_authentication) {
+      await this.authenticate(matched);
     }
 
-    if (bodyWrap.getElementsByTagName('auth').length === 0) {
-      // There are no matching SASL mechanisms and also no legacy
-      // auth available.
-      this.protocolManager.noAuthReceived(_callback);
+    if (wrappedBody.getElementsByTagName('auth').length === 0) {
+      // There are no matching SASL mechanisms and also no legacy auth available.
+      this.protocolManager.noAuthReceived();
     }
   }
 
@@ -1222,15 +1217,21 @@ export class Connection {
     prebindUrl?: string,
     credentialsUrl?: string
   ): Promise<Connection> {
+    if (Connection.instance) {
+      return Connection.instance;
+    }
+
     const connectionUrls = this.getConnectionsUrls(service, domain);
     const options = { keepalive: true, explicitResourceBinding: true };
 
     if (!connectionUrls.boshServiceUrl && !connectionUrls.websocketUrl && connectionUrls.domain) {
-      const { boshServiceUrl, websocketUrl } = await this.discoverConnectionMethods(connectionUrls.domain);
-      if (!connectionUrls.boshServiceUrl && authenticationMode === AuthenticationMode.PREBIND) {
+      const { boshServiceUrl, websocketUrl } = await this.discoverConnectionMethods(
+        connectionUrls.domain
+      );
+      if (boshServiceUrl && authenticationMode === AuthenticationMode.PREBIND) {
         throw new Error("authentication is set to 'prebind' but we don't have a BOSH connection");
       }
-      return new Connection(
+      Connection.instance = new Connection(
         websocketUrl ?? boshServiceUrl,
         options,
         authenticationMode,
@@ -1239,11 +1240,13 @@ export class Connection {
         websocketUrl,
         credentialsUrl
       );
+
+      return Connection.instance;
     }
 
-    const connection_url = connectionUrls.websocketUrl ?? connectionUrls.boshServiceUrl;
-    return new Connection(
-      connection_url,
+    const connectionUrl = connectionUrls.websocketUrl ?? connectionUrls.boshServiceUrl;
+    Connection.instance = new Connection(
+      connectionUrl,
       options,
       authenticationMode,
       prebindUrl,
@@ -1251,15 +1254,20 @@ export class Connection {
       connectionUrls.websocketUrl,
       credentialsUrl
     );
+
+    return Connection.instance;
   }
 
-  static getConnectionsUrls(service: string, domain: string): { domain: string; websocketUrl: string; boshServiceUrl: string } {
+  static getConnectionsUrls(
+    service: string,
+    domain: string
+  ): { domain: string; websocketUrl: string; boshServiceUrl: string } {
     const isWebsocket = /wss?:\/\//.test(service);
 
     return {
       domain,
       boshServiceUrl: isWebsocket ? undefined : service,
-      websocketUrl: isWebsocket ? service : undefined
+      websocketUrl: isWebsocket ? service : undefined,
     };
   }
 
@@ -1277,80 +1285,82 @@ export class Connection {
    *  initialized. It's used together with the `auto_login` configuration flag
    *  to determine whether Converse should try to log the user in if it
    *  fails to restore a previous auth'd session.
-   *  @param reconnecting
    */
-  async login(jid: string, password?: string, automatic = false, reconnecting = false): Promise<void> {
-    this.setUserJID(jid);
+  async login(jid: string, password?: string, automatic = false): Promise<void> {
+    this.jid = jid;
 
     // See whether there is a BOSH session to re-attach to
-    if (this.protocolManager instanceof Bosh && this.protocolManager.restoreBOSHSession(reconnecting)) {
+    if (this.protocolManager instanceof Bosh && this.protocolManager.restoreBOSHSession()) {
       return;
     }
-    if (this.protocolManager instanceof Bosh && this.handlePreBind && !automatic) {
-      return this.protocolManager.startNewPreboundBOSHSession(reconnecting);
+
+    const handlePreBind =
+      this.authenticationMode === AuthenticationMode.PREBIND && !!this.prebindUrl;
+    if (this.protocolManager instanceof Bosh && handlePreBind && !automatic) {
+      return this.protocolManager.startNewPreboundBOSHSession();
     }
 
     await this.attemptNewSession(this.authenticationMode, jid, password, automatic);
   }
 
-  async loginNew(username: string, domain: string, service: string, password: string): Promise<void> {
+  async loginNew(
+    username: string,
+    domain: string,
+    service: string,
+    password: string
+  ): Promise<void> {
     const separator = '@';
     const safeUsername = username.includes(separator) ? username.split(separator)[0] : username;
     const jid = safeUsername + separator + domain;
 
     const conn = await Connection.create(service, domain);
-    return new Promise((resolve, reject) => {
-      conn.connect(jid, password, this.createConnectionStatusHandler(safeUsername, domain, resolve, reject));
-    });
+    return conn.connect(jid, password, this.createConnectionStatusHandler());
   }
 
-  createConnectionStatusHandler(
-    username: string,
-    domain: string,
-    resolve: () => void,
-    reject: (reason?: string) => void
-  ): (status: Status, value: string) => void {
+  createConnectionStatusHandler(): (status: Status, value: string) => Promise<void> {
     return (status: Status, value: string) => {
-      log(LogLevel.INFO, `status update; status=${status}, value=${JSON.stringify(value)}`);
+      return new Promise((resolve, reject) => {
+        log(LogLevel.INFO, `status update; status=${status}, value=${JSON.stringify(value)}`);
 
-      switch (status) {
-        case Status.REDIRECT:
-        case Status.ATTACHED:
-        case Status.CONNECTING:
-        case Status.REGISTER:
-        case Status.REGISTERED:
-        case Status.AUTHENTICATING:
-        case Status.DISCONNECTING:
-        case Status.DISCONNECTED:
-          break;
-        case Status.CONNECTED:
-          resolve();
-          break;
-        case Status.ERROR:
-          reject(`An error occurred connecting, failed with status code: ${status}`);
-          break;
-        case Status.CONNFAIL:
-          reject(`The connection failed, failed with status code: ${status}`);
-          break;
-        case Status.AUTHFAIL:
-          reject(`The authentication failed, failed with status code: ${status}`);
-          break;
-        case Status.CONNTIMEOUT:
-          reject(`The connection timed out, failed with status code: ${status}`);
-          break;
-        case Status.CONFLICT:
-        case Status.REGIFAIL:
-        case Status.NOTACCEPTABLE:
-          reject(`Failed with status code: ${status}`);
-          break;
-        case Status.BINDREQUIRED:
-          this.bind();
-          break;
-        default:
-          log(LogLevel.ERROR, `Unhandled connection status; status=${status}`);
-      }
+        switch (status) {
+          case Status.REDIRECT:
+          case Status.ATTACHED:
+          case Status.CONNECTING:
+          case Status.REGISTER:
+          case Status.REGISTERED:
+          case Status.AUTHENTICATING:
+          case Status.DISCONNECTING:
+          case Status.DISCONNECTED:
+            break;
+          case Status.CONNECTED:
+            resolve();
+            break;
+          case Status.ERROR:
+            reject(`An error occurred connecting, failed with status code: ${status}`);
+            break;
+          case Status.CONNFAIL:
+            reject(`The connection failed, failed with status code: ${status}`);
+            break;
+          case Status.AUTHFAIL:
+            reject(`The authentication failed, failed with status code: ${status}`);
+            break;
+          case Status.CONNTIMEOUT:
+            reject(`The connection timed out, failed with status code: ${status}`);
+            break;
+          case Status.CONFLICT:
+          case Status.REGIFAIL:
+          case Status.NOTACCEPTABLE:
+            reject(`Failed with status code: ${status}`);
+            break;
+          case Status.BINDREQUIRED:
+            this.bind();
+            break;
+          default:
+            log(LogLevel.ERROR, `Unhandled connection status; status=${status}`);
+        }
 
-      this.stateSubject.next(status);
+        this.connectionStatusSubject.next({ status });
+      });
     };
   }
 
@@ -1361,13 +1371,15 @@ export class Connection {
    *
    * @param domain the xmpp server domain to requests the connection urls from
    */
-  static async discoverConnectionMethods(domain: string): Promise<{ websocketUrl: string; boshServiceUrl: string }> {
+  static async discoverConnectionMethods(
+    domain: string
+  ): Promise<{ websocketUrl: string; boshServiceUrl: string }> {
     // Use XEP-0156 to check whether this host advertises websocket or BOSH connection methods.
     const options = {
       mode: 'cors' as RequestMode,
       headers: {
-        Accept: 'application/xrd+xml, text/xml'
-      }
+        Accept: 'application/xrd+xml, text/xml',
+      },
     };
     const url = `https://${domain}/.well-known/host-meta`;
     let response: globalThis.Response;
@@ -1401,7 +1413,10 @@ export class Connection {
     const ws_methods = Array.from(ws_links).map((el) => el.getAttribute('href'));
 
     if (bosh_methods.length !== 0 && ws_methods.length !== 0) {
-      log(LogLevel.WARN, 'Neither BOSH nor WebSocket connection methods have been specified with XEP-0156.');
+      log(
+        LogLevel.WARN,
+        'Neither BOSH nor WebSocket connection methods have been specified with XEP-0156.'
+      );
       return null;
     }
 
@@ -1419,7 +1434,12 @@ export class Connection {
     this.data.push(element);
   }
 
-  async attemptNewSession(mode: AuthenticationMode, jid: string, password: string, automatic = false): Promise<void> {
+  async attemptNewSession(
+    mode: AuthenticationMode,
+    jid: string,
+    password: string,
+    automatic = false
+  ): Promise<void> {
     if ([AuthenticationMode.ANONYMOUS, AuthenticationMode.EXTERNAL].includes(mode) && !automatic) {
       await this.connect(jid);
       return;
@@ -1459,7 +1479,7 @@ export class Connection {
       // https://github.com/microsoft/TypeScript/issues/34550
       const creds = await navigator.credentials.get({ password: true } as unknown);
       if (creds && creds.type == 'password' && Connection.isValidJID(creds.id)) {
-        this.setUserJID(creds.id);
+        this.jid = creds.id;
         return { jid: creds.id, password: (creds as unknown as any).password };
       }
     } catch (e) {
@@ -1474,8 +1494,6 @@ export class Connection {
     }
     return false;
   }
-
-  fetchLoginCredentialsInterceptor = async (xhr: XMLHttpRequest): Promise<XMLHttpRequest> => xhr;
 
   async getLoginCredentials(credentialsURL: string): Promise<Credentials> {
     if (!credentialsURL && 'credentials' in navigator) {
@@ -1500,33 +1518,9 @@ export class Connection {
 
   async fetchLoginCredentials(wait = 0, credentialsURL: string): Promise<Credentials> {
     return firstValueFrom(
-      fromRxjs<Promise<Credentials>>(
-        new Promise(async (resolve, reject) => {
-          let xhr = new XMLHttpRequest();
-          xhr.open('GET', credentialsURL, true);
-          xhr.setRequestHeader('Accept', 'application/json, text/javascript');
-          xhr.onload = () => {
-            if (xhr.status >= 200 && xhr.status < 400) {
-              const data = JSON.parse(xhr.responseText);
-              this.setUserJID(data.jid);
-              resolve({
-                jid: data.jid,
-                password: data.password
-              });
-            } else {
-              reject(new Error(`${xhr.status}: ${xhr.responseText}`));
-            }
-          };
-          xhr.onerror = reject;
-          /**
-           * *Hook* which allows modifying the server request
-           *
-           * @event _converse#beforeFetchLoginCredentials
-           */
-          xhr = await this.fetchLoginCredentialsInterceptor(xhr);
-          xhr.send();
-        })
-      ).pipe(debounceTime(wait))
+      fromRxjs<Promise<Credentials>>(BoshRequest.get<Credentials>(credentialsURL)).pipe(
+        debounceTime(wait)
+      )
     );
   }
 
@@ -1546,7 +1540,7 @@ export class Connection {
    */
   switchTransport(): void {
     if (this.protocolManager instanceof StropheWebsocket && this.boshServiceUrl) {
-      this.setUserJID(this.bareJid);
+      this.jid = this.bareJid;
       this.doDisconnect();
       this.protocolManager = new Bosh(this, null);
       this.service = this.boshServiceUrl;
@@ -1555,9 +1549,9 @@ export class Connection {
         // When reconnecting anonymously, we need to connect with only
         // the domain, not the full JID that we had in our previous
         // (now failed) session.
-        this.setUserJID(this.domainJid);
+        this.jid = this.domainJid;
       } else {
-        this.setUserJID(this.bareJid);
+        this.jid = this.bareJid;
       }
       this.doDisconnect();
       this.protocolManager = new StropheWebsocket(this, this.stanzasInSubject);
@@ -1575,10 +1569,13 @@ export class Connection {
       // When reconnecting anonymously, we need to connect with only
       // the domain, not the full JID that we had in our previous
       // (now failed) session.
-      this.setUserJID(this.domainJid);
+      this.jid = this.domainJid;
     }
 
-    this.connectionStatusSubject.next({ status: Status.RECONNECTING, message: 'The connection has dropped, attempting to reconnect.' });
+    this.connectionStatusSubject.next({
+      status: Status.RECONNECTING,
+      message: 'The connection has dropped, attempting to reconnect.',
+    });
     /**
      * Triggered when the connection has dropped, but we will attempt
      * to reconnect again.
@@ -1586,12 +1583,13 @@ export class Connection {
     this.willReconnectSubject.next();
 
     this.reset();
-    await this.login(this.jid, undefined, false, true);
+    await this.login(this.jid);
+    await firstValueFrom(this.connectedSubject);
   }
 
   async logOut(): Promise<void> {
     await new Promise((resolve) => this.sendPresence($pres({ type: 'unavailable' }), resolve));
-    this.stateSubject.next(Status.DISCONNECTED); // after last send
+    this.connectionStatusSubject.next({ status: Status.DISCONNECTED }); // after last send
     this.disconnect('regular logout');
     this.reset();
   }
@@ -1600,156 +1598,13 @@ export class Connection {
    * Promise resolves if user account is registered successfully,
    * rejects if an error happens while registering, e.g. the username is already taken.
    */
-  async register(username: string, password: string, service: string, domain: string): Promise<void> {
-    const nsRegister = 'jabber:iq:register';
-
-    let registering = false;
-    let processed_features = false;
-    let connect_cb_data: { req: Element } = { req: null };
-
-    if (username.includes('@')) {
-      log(LogLevel.WARN, 'username should not contain domain, only local part, this can lead to errors!');
-    }
-
-    await this.logOut();
-    const conn = await Connection.create(service, domain);
-
-    const readyToStartRegistration = new Promise<void>((resolve) => {
-      // hooking strophe's _connect_cb
-      const connect_callback = conn._connect_cb.bind(conn);
-      conn._connect_cb = (req, callback) => {
-        if (registering) {
-          // Save this request in case we want to authenticate later
-          connect_cb_data = { req };
-          resolve();
-          return;
-        }
-
-        if (processed_features) {
-          // exchange Input hooks to not print the stream:features twice
-          const xmlInput = (el: Element): void => conn.xmlInput(el);
-          conn.xmlInput = () => {};
-          connect_callback(req, callback);
-          conn.xmlInput = xmlInput;
-        }
-
-        connect_callback(req, callback);
-      };
-
-      // hooking strophe`s authenticate
-      const authOld = async (matched: SASLMechanism[]): Promise<void> => conn.authenticate(matched);
-      conn.authenticate = async (matched: SASLMechanism[]): Promise<void> => {
-        const isMatched = typeof matched !== 'undefined';
-        if (isMatched) {
-          await authOld(matched);
-          return;
-        }
-
-        if (!username || !domain || !password) {
-          return;
-        }
-
-        this.sasl.setVariables(username + '@' + domain, password);
-
-        const req = connect_cb_data.req;
-        conn._connect_cb(req, connect_callback);
-      };
-    });
-
-    // anonymous connection
-    await conn.connect(
-      domain,
-      '',
-      this.createConnectionStatusHandler(
-        username,
-        domain,
-        () => {},
-        () => {}
-      )
-    );
-
-    registering = true;
-    await readyToStartRegistration;
-
-    await this.queryForRegistrationForm(conn, nsRegister);
-    await this.submitRegisterInformationQuery(conn, username, password, nsRegister);
-
-    registering = false;
-    processed_features = true;
-    // here we should have switched after processing the feature's stanza to the regular callback after login
-    conn.reset();
-    await this.logOut();
-    await this.loginNew(username, domain, service, password);
-  }
-
-  private async queryForRegistrationForm(conn: Connection, nsRegister: string): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      // send a get request for registration, to get all required data fields
-      conn.handlerService.addSysHandler(
-        (stanza) => {
-          const query = stanza.getElementsByTagName('query');
-          if (query.length !== 1) {
-            conn.changeConnectStatus(Status.REGIFAIL, 'unknown');
-            reject('registration failed by unknown reason');
-            return false;
-          }
-
-          conn.changeConnectStatus(Status.REGISTER, null);
-
-          resolve();
-          return false;
-        },
-        null,
-        'iq',
-        null,
-        null
-      );
-
-      conn.sendIQ($iq({ type: 'get' }).c('query', { xmlns: nsRegister }).tree());
-    });
-  }
-
-  private async submitRegisterInformationQuery(conn: Connection, username: string, password: string, nsRegister: string): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      conn.handlerService.addSysHandler(
-        (stanza) => {
-          let error = null;
-
-          if (stanza.getAttribute('type') === 'error') {
-            error = stanza.getElementsByTagName('error');
-            if (error.length !== 1) {
-              conn.changeConnectStatus(Status.REGIFAIL, 'unknown');
-              reject();
-              return false;
-            }
-
-            // this is either 'conflict' or 'not-acceptable'
-            error = error[0].firstChild.nodeName.toLowerCase();
-            if (error === 'conflict') {
-              conn.changeConnectStatus(Status.CONFLICT, error);
-              reject();
-            } else if (error === 'not-acceptable') {
-              conn.changeConnectStatus(Status.NOTACCEPTABLE, error);
-              reject();
-            } else {
-              conn.changeConnectStatus(Status.REGIFAIL, error);
-              reject();
-            }
-          } else {
-            conn.changeConnectStatus(Status.REGISTERED, null);
-            resolve();
-          }
-
-          return false; // makes strophe delete the sysHandler
-        },
-        null,
-        'iq',
-        null,
-        null
-      );
-
-      conn.sendIQ($iq({ type: 'set' }).c('query', { xmlns: nsRegister }).c('username', {}, username).c('password', {}, password));
-    });
+  async register(
+    username: string,
+    password: string,
+    service: string,
+    domain: string
+  ): Promise<void> {
+    return register(username, password, service, domain);
   }
 
   finishDisconnection(): void {
@@ -1769,7 +1624,11 @@ export class Connection {
    * to reconnect.
    *
    */
-  private async onDisconnected(disconnectionStatus: Status, disconnectionReason: string, automaticLogin?: boolean): Promise<void> {
+  private async onDisconnected(
+    disconnectionStatus: Status,
+    disconnectionReason: string,
+    automaticLogin?: boolean
+  ): Promise<void> {
     if (!automaticLogin) {
       await this.finishDisconnection();
       return;
@@ -1786,10 +1645,13 @@ export class Connection {
     // or with a cached JID and password
     const isConnectionAnonymous = this.authenticationMode === AuthenticationMode.ANONYMOUS;
 
-    const unrecoverableDisconnectionCause = [ErrorCondition.NO_AUTH_MECH, 'host-unknown', 'remote-connection-failed'].includes(
-      disconnectionReason
-    );
-    const isAbleToReconnect = disconnectionStatus !== Status.DISCONNECTING || unrecoverableDisconnectionCause;
+    const unrecoverableDisconnectionCause = [
+      ErrorCondition.NO_AUTH_MECH,
+      'host-unknown',
+      'remote-connection-failed',
+    ].includes(disconnectionReason);
+    const isAbleToReconnect =
+      disconnectionStatus !== Status.DISCONNECTING || unrecoverableDisconnectionCause;
 
     if (failedAuthenticationWithCredentialsUrl || isConnectionAnonymous || isAbleToReconnect) {
       await this.reconnect();
@@ -1808,9 +1670,8 @@ export class Connection {
    *
    * @param {number} status
    * @param {string} message
-   * @param {boolean} reconnecting
    */
-  async onConnectStatusChanged(status: Status, message: string, reconnecting: boolean): Promise<void> {
+  async onConnectStatusChanged(status: Status, message: string): Promise<void> {
     switch (status) {
       case Status.REDIRECT:
       case Status.CONNTIMEOUT:
@@ -1820,7 +1681,6 @@ export class Connection {
       case Status.REGISTERED:
       case Status.CONFLICT:
       case Status.NOTACCEPTABLE:
-      default:
         break;
       case Status.ERROR:
       case Status.CONNECTING:
@@ -1832,15 +1692,25 @@ export class Connection {
         break;
       case Status.DISCONNECTED:
       case Status.AUTHFAIL:
-        await this.handleDisconnectedStatus(status, message);
+        this.connectionStatusSubject.next({ status, message });
+        await this.onDisconnected(status, message);
         break;
       case Status.CONNECTED:
       case Status.ATTACHED:
-        this.handleConnectedStatus(status, message, reconnecting);
+        this.connectionStatusSubject.next({ status, message });
+        this.flush(); // Solves problem of returned PubSub BOSH response not received by browser
+        /**
+         * Synchronous event triggered after we've sent an IQ to bind the
+         * user's JID resource for this session.
+         */
+        this.afterResourceBindingSubject.next();
+        this.connectedSubject.next();
         break;
       case Status.BINDREQUIRED:
         this.bind();
         break;
+      default:
+        throw new Error('Unknown connection state; status=' + status);
     }
   }
 
@@ -1848,44 +1718,6 @@ export class Connection {
     delete this.domainJid;
     delete this.bareJid;
     delete this.session;
-    this.setProtocol();
-  }
-
-  private async handleDisconnectedStatus(status: Status.DISCONNECTED | Status.AUTHFAIL, message: string): Promise<void> {
-    this.connectionStatusSubject.next({ status, message });
-    await this.onDisconnected(status, message);
-  }
-
-  private handleConnectedStatus(status: Status.CONNECTED | Status.ATTACHED, message: string, reconnecting: boolean): void {
-    this.connectionStatusSubject.next({ status, message });
-
-    const isConnected = status === Status.CONNECTED;
-    if (reconnecting) {
-      log(LogLevel.DEBUG, isConnected ? 'Reconnected' : 'Reattached');
-    } else {
-      log(LogLevel.DEBUG, isConnected ? 'Connected' : 'Attached');
-    }
-
-    this.flush(); // Solves problem of returned PubSub BOSH response not received by browser
-    this.setUserJID(this.jid);
-
-    /**
-     * Synchronous event triggered after we've sent an IQ to bind the
-     * user's JID resource for this session.
-     */
-    this.afterResourceBindingSubject.next();
-
-    if (reconnecting) {
-      /**
-       * After the connection has dropped and we have reconnected.
-       * Any Strophe stanza handlers will have to be registered anew.
-       */
-      this.reconnectedSubject.next();
-    } else {
-      /**
-       * Triggered after the connection has been established
-       */
-      this.connectedSubject.next();
-    }
+    this.protocolManager = this.createProtocolManager();
   }
 }

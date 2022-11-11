@@ -1,19 +1,19 @@
-import { SASLMechanismBase } from './sasl';
-import { Connection } from './connection';
+import { Sasl } from './sasl';
+import { SASLMechanismBase } from './sasl-mechanism-base';
 
 export class SASLAnonymous extends SASLMechanismBase {
-  /** PrivateConstructor: SASLAnonymous
+  /**
    *  SASL ANONYMOUS authentication.
    */
   constructor() {
     super('ANONYMOUS', false, 20);
   }
 
-  onChallenge(_connection: Connection): Promise<string> {
-    return Promise.resolve('');
+  onChallenge(_sasl: Sasl): Promise<string> {
+    return Promise.resolve(null);
   }
 
-  test(connection: Connection): boolean {
-    return connection.authcid === null;
+  test(sasl: Sasl): boolean {
+    return sasl.authcid === null;
   }
 }

@@ -1,6 +1,6 @@
 import { SASLMechanism } from './sasl-mechanism';
 import { Handler } from './handler';
-import { HandlerAsync } from './handlerAsync';
+import { HandlerAsync } from './handler-async';
 import { SASLAnonymous } from './sasl-anon';
 import { SASLExternal } from './sasl-external';
 import { SASLOAuthBearer } from './sasl-oauthbearer';
@@ -16,9 +16,10 @@ import { getBareJidFromJid, getNodeFromJid, getText } from './xml';
 import { info } from './log';
 import { Status } from './status';
 import { Connection } from './connection';
+import { SaslData } from './sasl-data';
 
 export class Sasl {
-  saslData: Record<string, unknown> = {};
+  saslData: SaslData = {};
   doBind = false;
   doSession = false;
   mechanism: Record<string, SASLMechanism>;
@@ -36,6 +37,7 @@ export class Sasl {
    *  Authorization identity.
    */
   authzid: string;
+
   /** Variable: authcid
    *  Set on connection.
    *  Authentication identity (Username).
@@ -51,7 +53,6 @@ export class Sasl {
   constructor(readonly connection: Connection) {}
 
   /**
-   *
    * Register the SASL mechanisms which will be supported by this instance of
    * Connection (i.e. which this XMPP client will support).
    *
@@ -73,14 +74,13 @@ export class Sasl {
         SASLSHA1,
         SASLSHA256,
         SASLSHA384,
-        SASLSHA512
+        SASLSHA512,
       ] as unknown as SASLMechanism[]);
     // @ts-ignore
     mechanisms.forEach((m) => this.registerSASLMechanism(m));
   }
 
   /**
-   *
    * Register a single SASL mechanism, to be supported by this client.
    *
    *  Parameters:
@@ -90,11 +90,10 @@ export class Sasl {
    */
   registerSASLMechanism<T extends SASLMechanism>(mechanism: new () => T): void {
     const tmpMechanism = new mechanism();
-    this.mechanisms[tmpMechanism.mechname] = tmpMechanism;
+    this.mechanism[tmpMechanism.mechname] = tmpMechanism;
   }
 
   /**
-   *
    *  Sorts an array of objects with prototype SASLMechanism according to
    *  their priorities.
    *
@@ -122,7 +121,6 @@ export class Sasl {
   }
 
   /**
-   *
    *  Iterate through an array of SASL mechanisms and attempt authentication
    *  with the highest priority (enabled) mechanism.
    *
@@ -138,22 +136,40 @@ export class Sasl {
     mechanisms = this.sortMechanismsByPriority(mechanisms || []);
     let mechanism_found = false;
     for (const mechanism of mechanisms) {
-      if (!mechanism.test(this.connection)) {
+      if (!mechanism.test(this)) {
         continue;
       }
-      this.saslSuccessHandler = this.connection.addSysHandler((el) => this.saslSuccessCb(el), null, 'success', null, null);
-      this.saslFailureHandler = this.connection.addSysHandler((el) => this.saslFailureCb(el), null, 'failure', null, null);
-      this.saslChallengeHandler = this.connection.addSysHandlerPromise((el) => this.saslChallengeCb(el), null, 'challenge', null, null);
+      this.saslSuccessHandler = this.connection.handlerService.addSysHandler(
+        (el) => this.saslSuccessCb(el),
+        null,
+        'success',
+        null,
+        null
+      );
+      this.saslFailureHandler = this.connection.handlerService.addSysHandler(
+        (el) => this.saslFailureCb(el),
+        null,
+        'failure',
+        null,
+        null
+      );
+      this.saslChallengeHandler = this.connection.handlerService.addSysHandlerPromise(
+        (el) => this.saslChallengeCb(el),
+        null,
+        'challenge',
+        null,
+        null
+      );
 
       this.saslMechanism = mechanism;
-      this.saslMechanism.onStart(this.connection);
+      this.saslMechanism.onStart(this);
 
       const request_auth_exchange = $build('auth', {
         xmlns: NS.SASL,
-        mechanism: this.saslMechanism.mechname
+        mechanism: this.saslMechanism.mechname,
       });
       if (this.saslMechanism.isClientFirst) {
-        const response = await this.saslMechanism.clientChallenge(this.connection);
+        const response = await this.saslMechanism.clientChallenge(this);
         request_auth_exchange.t(btoa(response));
       }
       this.connection.send(request_auth_exchange.tree());
@@ -169,7 +185,7 @@ export class Sasl {
    */
   async saslChallengeCb(elem: Element): Promise<boolean> {
     const challenge = atob(getText(elem));
-    const response = await this.saslMechanism.onChallenge(this.connection, challenge);
+    const response = await this.saslMechanism.onChallenge(this, challenge);
     const stanza = $build('response', { xmlns: NS.SASL });
     if (response !== '') {
       stanza.t(btoa(response));
@@ -183,13 +199,13 @@ export class Sasl {
    *
    *  Parameters:
    *
-   *   @param (XMLElement) elem - The matching stanza.
+   *   @param elem - The matching stanza.
    *
    *  Returns:
    *    false to remove the handler.
    */
-  saslSuccessCb(elem: Element) {
-    if (this.saslData['server-signature']) {
+  saslSuccessCb(elem: Element): boolean {
+    if (this.saslData.serverSignature) {
       let serverSignature;
       const success = atob(getText(elem));
       const attribMatch = /([a-z]+)=([^,]+)(,|$)/;
@@ -197,12 +213,12 @@ export class Sasl {
       if (matches[1] === 'v') {
         serverSignature = matches[2];
       }
-      if (serverSignature !== this.saslData['server-signature']) {
+      if (serverSignature !== this.saslData.serverSignature) {
         // remove old handlers
-        this.connection.deleteHandler(this.saslFailureHandler);
+        this.connection.handlerService.deleteHandler(this.saslFailureHandler);
         this.saslFailureHandler = null;
         if (this.saslChallengeHandler) {
-          this.connection.deleteHandlerAsync(this.saslChallengeHandler);
+          this.connection.handlerService.deleteHandlerAsync(this.saslChallengeHandler);
           this.saslChallengeHandler = null;
         }
         this.saslData = {};
@@ -219,37 +235,49 @@ export class Sasl {
       this.saslMechanism.onSuccess();
     }
     // remove old handlers
-    this.connection.deleteHandler(this.saslFailureHandler);
+    this.connection.handlerService.deleteHandler(this.saslFailureHandler);
     this.saslFailureHandler = null;
     if (this.saslChallengeHandler) {
-      this.connection.deleteHandlerAsync(this.saslChallengeHandler);
+      this.connection.handlerService.deleteHandlerAsync(this.saslChallengeHandler);
       this.saslChallengeHandler = null;
     }
     const streamfeature_handlers: Handler[] = [];
-    const wrapper = (handlers: Handler[], el: Element) => {
+    const wrapper = (handlers: Handler[], el: Element): boolean => {
       while (handlers.length) {
-        this.connection.deleteHandler(handlers.pop());
+        this.connection.handlerService.deleteHandler(handlers.pop());
       }
-      this._onStreamFeaturesAfterSASL(el);
+      this.onStreamFeaturesAfterSASL(el);
       return false;
     };
     streamfeature_handlers.push(
-      this.connection.addSysHandler((el) => wrapper(streamfeature_handlers, el), null, 'stream:features', null, null)
+      this.connection.handlerService.addSysHandler(
+        (el) => wrapper(streamfeature_handlers, el),
+        null,
+        'stream:features',
+        null,
+        null
+      )
     );
 
     streamfeature_handlers.push(
-      this.connection.addSysHandler((el) => wrapper(streamfeature_handlers, el), NS.STREAM, 'features', null, null)
+      this.connection.handlerService.addSysHandler(
+        (el) => wrapper(streamfeature_handlers, el),
+        NS.STREAM,
+        'features',
+        null,
+        null
+      )
     );
 
     // we must send a xmpp:restart now
-    this._sendRestart();
+    this.sendRestart();
     return false;
   }
 
   /**
    *  Send an xmpp:restart stanza.
    */
-  _sendRestart() {
+  sendRestart(): void {
     this.connection.data.push($build('restart').tree());
     this.connection.protocolManager.sendRestart();
     // @ts-ignore
@@ -257,13 +285,9 @@ export class Sasl {
   }
 
   /**
-   *  Parameters:
-   *    (XMLElement) elem - The matching stanza.
-   *
-   *  Returns:
-   *    false to remove the handler.
+   *  @param elem - The matching stanza.
    */
-  _onStreamFeaturesAfterSASL(elem: Element) {
+  onStreamFeaturesAfterSASL(elem: Element): false {
     // save stream:features for future usage
     this.connection.features = elem;
     for (const child of Array.from(elem.childNodes)) {
@@ -298,11 +322,11 @@ export class Sasl {
   saslFailureCb(elem?: Element): boolean {
     // delete unneeded handlers
     if (this.saslSuccessHandler) {
-      this.connection.deleteHandler(this.saslSuccessHandler);
+      this.connection.handlerService.deleteHandler(this.saslSuccessHandler);
       this.saslSuccessHandler = null;
     }
     if (this.saslChallengeHandler) {
-      this.connection.deleteHandlerAsync(this.saslChallengeHandler);
+      this.connection.handlerService.deleteHandlerAsync(this.saslChallengeHandler);
       this.saslChallengeHandler = null;
     }
 

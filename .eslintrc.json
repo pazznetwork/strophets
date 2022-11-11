@@ -1,17 +1,21 @@
 {
   "root": true,
   "parser": "@typescript-eslint/parser",
+  "extends": [
+    "plugin:rxjs/recommended",
+    "plugin:eslint-comments/recommended",
+    "plugin:prettier/recommended"
+  ],
   "plugins": [
     "@typescript-eslint",
     "eslint-plugin-jsdoc",
     "eslint-plugin-import",
-    "eslint-plugin-rxjs",
     "eslint-plugin-jasmine",
-    "eslint-plugin-eslint-comments",
-    "eslint-plugin-prefer-arrow",
-    "eslint-plugin-prettier"
+    "eslint-plugin-prefer-arrow"
   ],
-  "ignorePatterns": ["dist/*"],
+  "ignorePatterns": [
+    "dist/*"
+  ],
   "overrides": [
     {
       "files": [
@@ -170,17 +174,6 @@
         "jasmine/no-focused-tests": "error",
         "jsdoc/check-alignment": "error",
         "jsdoc/newline-after-description": "error",
-        "max-len": [
-          "error",
-          {
-            "code": 140,
-            "ignoreComments": true,
-            "ignoreStrings": true,
-            "ignoreTemplateLiterals": true,
-            "ignoreRegExpLiterals": true,
-            "ignorePattern": "\\^import .\\*"
-          }
-        ],
         "no-console": [
           "error",
           {}
@@ -214,13 +207,7 @@
         "rxjs/no-nested-subscribe": "warn",
         "rxjs/no-unsafe-takeuntil": "error",
         "rxjs/suffix-subjects": "warn",
-        "rxjs/throw-error": "error",
-        "prettier/prettier": [
-          "error",
-          {
-            "printWidth": 140
-          }
-        ]
+        "rxjs/throw-error": "error"
       }
     }
   ]

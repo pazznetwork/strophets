@@ -1,8 +1,12 @@
 import { arrayBufToBase64, base64ToArrayBuf, stringToArrayBuf, xorArrayBuffers } from './utils';
 import { warn } from './log';
-import { Connection } from './connection';
+import { Sasl } from './sasl';
 
-async function scramClientProof(authMessage: string, clientKey: ArrayBufferLike, hashName: string) {
+async function scramClientProof(
+  authMessage: string,
+  clientKey: ArrayBufferLike,
+  hashName: string
+): Promise<ArrayBuffer> {
   const storedKey = await window.crypto.subtle.importKey(
     'raw',
     await window.crypto.subtle.digest(hashName, clientKey),
@@ -10,7 +14,11 @@ async function scramClientProof(authMessage: string, clientKey: ArrayBufferLike,
     false,
     ['sign']
   );
-  const clientSignature = await window.crypto.subtle.sign('HMAC', storedKey, stringToArrayBuf(authMessage));
+  const clientSignature = await window.crypto.subtle.sign(
+    'HMAC',
+    storedKey,
+    stringToArrayBuf(authMessage)
+  );
 
   return xorArrayBuffers(clientKey, clientSignature);
 }
@@ -23,7 +31,11 @@ async function scramClientProof(authMessage: string, clientKey: ArrayBufferLike,
  * }
  * Returns undefined on failure.
  */
-function scramParseChallenge(challenge: string) {
+function scramParseChallenge(challenge: string): {
+  salt: ArrayBuffer;
+  iter: number;
+  nonce: string;
+} {
   let nonce, salt, iter;
   const attribMatch = /([a-z]+)=([^,]+)(,|$)/;
   while (challenge.match(attribMatch)) {
@@ -66,28 +78,52 @@ function scramParseChallenge(challenge: string) {
  *   sk: ArrayBuffer, the server key
  * }
  */
-async function scramDeriveKeys(password: string, salt: ArrayBufferLike, iter: number, hashName: string, hashBits: number) {
+async function scramDeriveKeys(
+  password: string,
+  salt: ArrayBufferLike,
+  iter: number,
+  hashName: string,
+  hashBits: number
+): Promise<{ ck: ArrayBuffer; sk: ArrayBuffer }> {
   const saltedPasswordBits = await window.crypto.subtle.deriveBits(
     { name: 'PBKDF2', salt, iterations: iter, hash: { name: hashName } },
-    await window.crypto.subtle.importKey('raw', stringToArrayBuf(password), 'PBKDF2', false, ['deriveBits']),
+    await window.crypto.subtle.importKey('raw', stringToArrayBuf(password), 'PBKDF2', false, [
+      'deriveBits',
+    ]),
     hashBits
   );
-  const saltedPassword = await window.crypto.subtle.importKey('raw', saltedPasswordBits, { name: 'HMAC', hash: hashName }, false, ['sign']);
+  const saltedPassword = await window.crypto.subtle.importKey(
+    'raw',
+    saltedPasswordBits,
+    { name: 'HMAC', hash: hashName },
+    false,
+    ['sign']
+  );
 
   return {
     ck: await window.crypto.subtle.sign('HMAC', saltedPassword, stringToArrayBuf('Client Key')),
-    sk: await window.crypto.subtle.sign('HMAC', saltedPassword, stringToArrayBuf('Server Key'))
+    sk: await window.crypto.subtle.sign('HMAC', saltedPassword, stringToArrayBuf('Server Key')),
   };
 }
 
-async function scramServerSign(authMessage: string, sk: ArrayBufferLike, hashName: string) {
-  const serverKey = await window.crypto.subtle.importKey('raw', sk, { name: 'HMAC', hash: hashName }, false, ['sign']);
+async function scramServerSign(
+  authMessage: string,
+  sk: ArrayBufferLike,
+  hashName: string
+): Promise<ArrayBuffer> {
+  const serverKey = await window.crypto.subtle.importKey(
+    'raw',
+    sk,
+    { name: 'HMAC', hash: hashName },
+    false,
+    ['sign']
+  );
 
   return window.crypto.subtle.sign('HMAC', serverKey, stringToArrayBuf(authMessage));
 }
 
 // Generate an ASCII nonce (not containing the ',' character)
-function generate_cnonce() {
+function generateCnonce(): string {
   // generate 16 random bytes of nonce, base64 encoded
   const bytes = new Uint8Array(16);
   return arrayBufToBase64(crypto.getRandomValues(bytes).buffer);
@@ -102,39 +138,50 @@ function generate_cnonce() {
  *
  * On failure, returns connection._sasl_failure_cb();
  */
-export async function scramResponse(connection: Connection, challenge: string, hashName: string, hashBits: number) {
-  const cnonce = connection.saslData.cnonce as string;
+export async function scramResponse(
+  sasl: Sasl,
+  challenge: string,
+  hashName: string,
+  hashBits: number
+): Promise<string | Error | boolean> {
+  const cnonce = sasl.saslData.cnonce as string;
   const challengeData = scramParseChallenge(challenge);
 
   // The RFC requires that we verify the (server) nonce has the client
   // nonce as an initial substring.
   if (!challengeData && challengeData?.nonce.slice(0, cnonce.length) !== cnonce) {
     warn('Failing SCRAM authentication because server supplied incorrect nonce.');
-    connection.saslData = {};
-    return connection.saslFailureCb();
+    sasl.saslData = {};
+    return sasl.saslFailureCb();
   }
 
   let clientKey, serverKey;
 
   // Either restore the client key and server key passed in, or derive new ones
   if (
-    typeof connection.pass !== 'string' &&
-    connection.pass?.name === hashName &&
-    connection.pass?.salt === arrayBufToBase64(challengeData.salt) &&
-    connection.pass?.iter === challengeData.iter
+    typeof sasl.pass !== 'string' &&
+    sasl.pass?.name === hashName &&
+    sasl.pass?.salt === arrayBufToBase64(challengeData.salt) &&
+    sasl.pass?.iter === challengeData.iter
   ) {
-    clientKey = base64ToArrayBuf(connection.pass.ck);
-    serverKey = base64ToArrayBuf(connection.pass.sk);
-  } else if (typeof connection.pass === 'string') {
-    const keys = await scramDeriveKeys(connection.pass, challengeData.salt, challengeData.iter, hashName, hashBits);
+    clientKey = base64ToArrayBuf(sasl.pass.ck);
+    serverKey = base64ToArrayBuf(sasl.pass.sk);
+  } else if (typeof sasl.pass === 'string') {
+    const keys = await scramDeriveKeys(
+      sasl.pass,
+      challengeData.salt,
+      challengeData.iter,
+      hashName,
+      hashBits
+    );
     clientKey = keys.ck;
     serverKey = keys.sk;
   } else {
-    connection.saslFailureCb();
+    sasl.saslFailureCb();
     return new Error('SASL SCRAM ERROR');
   }
 
-  const clientFirstMessageBare = connection.saslData['client-first-message-bare'];
+  const clientFirstMessageBare = sasl.saslData.clientFirstMessageBare;
   const serverFirstMessage = challenge;
   const clientFinalMessageBare = `c=biws,r=${challengeData.nonce}`;
 
@@ -143,23 +190,23 @@ export async function scramResponse(connection: Connection, challenge: string, h
   const clientProof = await scramClientProof(authMessage, clientKey, hashName);
   const serverSignature = await scramServerSign(authMessage, serverKey, hashName);
 
-  connection.saslData['server-signature'] = arrayBufToBase64(serverSignature);
-  connection.saslData.keys = {
+  sasl.saslData.serverSignature = arrayBufToBase64(serverSignature);
+  sasl.saslData.keys = {
     name: hashName,
     iter: challengeData.iter,
     salt: arrayBufToBase64(challengeData.salt),
     ck: arrayBufToBase64(clientKey),
-    sk: arrayBufToBase64(serverKey)
+    sk: arrayBufToBase64(serverKey),
   };
 
   return `${clientFinalMessageBare},p=${arrayBufToBase64(clientProof)}`;
 }
 
 // Returns a string containing the client first message
-export function clientChallenge(connection: Connection, test_cnonce: string) {
-  const cnonce = test_cnonce || generate_cnonce();
-  const client_first_message_bare = `n=${connection.authcid},r=${cnonce}`;
-  connection.saslData.cnonce = cnonce;
-  connection.saslData['client-first-message-bare'] = client_first_message_bare;
-  return `n,,${client_first_message_bare}`;
+export function clientChallenge(sasl: Sasl, testCnonce: string): string {
+  const cnonce = testCnonce || generateCnonce();
+  const clientFirstMessageBare = `n=${sasl.authcid},r=${cnonce}`;
+  sasl.saslData.cnonce = cnonce;
+  sasl.saslData.clientFirstMessageBare = clientFirstMessageBare;
+  return `n,,${clientFirstMessageBare}`;
 }
