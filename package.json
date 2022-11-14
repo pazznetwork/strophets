@@ -1,7 +1,7 @@
 {
   "name": "@pazznetwork/strophets",
   "description": "Strophe.ts is an XMPP library for TypeScript",
-  "version": "0.0.9",
+  "version": "0.0.10",
   "homepage": "https://github.com/pazznetwork/strophets",
   "repository": {
     "type": "git",
@@ -24,8 +24,9 @@
     "LICENSE.txt",
     "README.txt"
   ],
-  "author": "Jack Moffit (metajack)",
+  "author": "Jakub Mikos (Codebastard)" ,
   "contributors": [
+    "Jack Moffit (metajack)",
     "Nathan Zorn (thepug)",
     "Andreas Guth (Gordin)",
     "Anton Stroganov (Aeon)",
