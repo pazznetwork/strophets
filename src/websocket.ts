@@ -172,7 +172,7 @@ export class StropheWebsocket implements ProtocolManager {
       }
 
       const streamStart = this.parseToXml(data);
-      this.connection.xmlInput(streamStart);
+      this.connection.xmlInput?.(streamStart);
       this.stanzasInSubject.next(streamStart);
 
       //_handleStreamSteart will check for XML errors and disconnect on error
@@ -185,7 +185,7 @@ export class StropheWebsocket implements ProtocolManager {
       // Parse the raw string to an XML element
       const parsedMessage = this.parseToXml(message.data);
       // Report this input to the raw and xml handlers
-      this.connection.xmlInput(parsedMessage);
+      this.connection.xmlInput?.(parsedMessage);
       this.stanzasInSubject.next(parsedMessage);
       const see_uri = parsedMessage.getAttribute('see-other-uri');
       if (see_uri) {
@@ -232,7 +232,7 @@ export class StropheWebsocket implements ProtocolManager {
         this.connection.send(pres);
       }
       const close = $build('close', { xmlns: NS.FRAMING });
-      this.connection.xmlOutput(close.tree());
+      this.connection.xmlOutput?.(close.tree());
       const closeString = serialize(close);
       try {
         this.socket.send(closeString);
@@ -337,7 +337,7 @@ export class StropheWebsocket implements ProtocolManager {
         if (dataPart !== null) {
           const stanza = dataPart.tagName === 'restart' ? this.buildStream().tree() : dataPart;
           const rawStanza = serialize(stanza);
-          this.connection.xmlOutput(stanza);
+          this.connection.xmlOutput?.(stanza);
           this.socket.send(rawStanza);
         }
       }
@@ -369,7 +369,7 @@ export class StropheWebsocket implements ProtocolManager {
     // check for closing stream
     const close = '<close xmlns="urn:ietf:params:xml:ns:xmpp-framing" />';
     if (xmlData === close) {
-      this.connection.xmlInput(xmlData);
+      this.connection.xmlInput?.(xmlData);
       this.stanzasInSubject.next(xmlData);
       if (!this.connection.disconnecting) {
         this.connection.doDisconnect();
@@ -397,7 +397,7 @@ export class StropheWebsocket implements ProtocolManager {
       firstChild.nodeName === 'presence' &&
       firstChild.getAttribute('type') === 'unavailable'
     ) {
-      this.connection.xmlInput(elem);
+      this.connection.xmlInput?.(elem);
       this.stanzasInSubject.next(elem);
       // if we are already disconnecting we will ignore the unavailable stanza and
       // wait for the </stream:stream> tag before we close the connection
@@ -412,7 +412,7 @@ export class StropheWebsocket implements ProtocolManager {
   onOpen(): void {
     debug('Websocket open');
     const start = this.buildStream();
-    this.connection.xmlOutput(start.tree());
+    this.connection.xmlOutput?.(start.tree());
     this.stanzasInSubject.next(start.tree());
 
     const startString = serialize(start);

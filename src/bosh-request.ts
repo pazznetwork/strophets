@@ -177,7 +177,7 @@ export class BoshRequest {
 
       this.sends++;
 
-      connection.xmlOutput(this.xmlData);
+      connection.xmlOutput?.(this.xmlData);
     } else {
       debug(
         '_processRequest: ' +

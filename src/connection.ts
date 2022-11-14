@@ -129,6 +129,22 @@ export class Connection {
   readonly handlerService = new HandlerService(this);
 
   /**
+   *  User overrideable function that receives XML data coming into the
+   *  connection.
+   *
+   *    @param elem - XML data received by the connection.
+   */
+  xmlInput: (elem: Element) => void;
+
+  /**
+   *  User overrideable function that receives XML data sent to the
+   *  connection.
+   *
+   *    @param elem - XML data sent by the connection.
+   */
+  xmlOutput: (elem: Element) => void;
+
+  /**
    * The connected JID.
    */
   private backingJid = '';
@@ -435,52 +451,6 @@ export class Connection {
       stropheError.name = 'StropheSessionError';
       throw stropheError;
     }
-  }
-
-  /**
-   *  User overrideable function that receives XML data coming into the
-   *  connection.
-   *
-   *  The default function does nothing.  User code can override this with
-   *  > Connection.xmlInput = function (elem) {
-   *  >   (user code)
-   *  > };
-   *
-   *  Due to limitations of current Browsers' XML-Parsers the opening and closing
-   *  <stream> tag for WebSocket-Connoctions will be passed as selfclosing here.
-   *
-   *  BOSH-Connections will have all stanzas wrapped in a <body> tag. See
-   *  <Bosh.strip> if you want to strip this tag.
-   *
-   *  Parameters:
-   *
-   *    @param _elem - XML data received by the connection.
-   */
-  xmlInput(_elem: Element): void {
-    return;
-  }
-
-  /**
-   *  User overrideable function that receives XML data sent to the
-   *  connection.
-   *
-   *  The default function does nothing.  User code can override this with
-   *  > Connection.xmlOutput = function (elem) {
-   *  >   (user code)
-   *  > };
-   *
-   *  Due to limitations of current Browsers' XML-Parsers the opening and closing
-   *  <stream> tag for WebSocket-Connoctions will be passed as selfclosing here.
-   *
-   *  BOSH-Connections will have all stanzas wrapped in a <body> tag. See
-   *  <Bosh.strip> if you want to strip this tag.
-   *
-   *  Parameters:
-   *
-   *    @param _elem - XML data sent by the connection.
-   */
-  xmlOutput(_elem: Element): void {
-    return;
   }
 
   /**
@@ -1088,7 +1058,7 @@ export class Connection {
       return;
     }
 
-    this.xmlInput(elem);
+    this.xmlInput?.(elem);
     this.stanzasInSubject.next(elem);
 
     this.handlerService.removeScheduledHandlers();
@@ -1181,7 +1151,7 @@ export class Connection {
       return;
     }
 
-    this.xmlInput(wrappedBody);
+    this.xmlInput?.(wrappedBody);
 
     const connectionCheck = this.protocolManager.connectCb(wrappedBody);
 
