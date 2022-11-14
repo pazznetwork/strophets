@@ -1274,8 +1274,7 @@ export class Connection {
   /**
    * Logs the user in.
    *
-   * If called without any parameters, Converse will try
-   * to log the user in by calling the `prebind_url` or `credentials_url` depending
+   * If called without any parameters, we will try to log the user in by calling the `prebind_url` or `credentials_url` depending
    * on whether prebinding is used or not.
    *
    * @param {string} [jid]
@@ -1284,7 +1283,7 @@ export class Connection {
    *  this method was called automatically once the connection has been
    *  initialized. It's used together with the `auto_login` configuration flag
    *  to determine whether Converse should try to log the user in if it
-   *  fails to restore a previous auth'd session.
+   *  fails to restore a previous authenticated session.
    */
   async login(jid: string, password?: string, automatic = false): Promise<void> {
     this.jid = jid;
@@ -1303,64 +1302,34 @@ export class Connection {
     await this.attemptNewSession(this.authenticationMode, jid, password, automatic);
   }
 
-  async loginNew(
+  /**
+   * Logs the user in without a jid.
+   *
+   * @param username the local name part of the jid on the xmpp server account
+   * @param domain the domain of the xmpp server one is connecting to
+   * @param {string} [password?] authenticating password
+   * @param {boolean} [automatic=false] - An internally used flag that indicates whether
+   *  this method was called automatically once the connection has been
+   *  initialized. It's used together with the `auto_login` configuration flag
+   *  to determine whether Converse should try to log the user in if it
+   *  fails to restore a previous authenticated session.
+   */
+  async loginWithoutJid(
     username: string,
     domain: string,
-    service: string,
-    password: string
+    password?: string,
+    automatic = false
   ): Promise<void> {
     const separator = '@';
     const safeUsername = username.includes(separator) ? username.split(separator)[0] : username;
     const jid = safeUsername + separator + domain;
-
-    const conn = await Connection.create(service, domain);
-    return conn.connect(jid, password, this.createConnectionStatusHandler());
+    return this.login(jid, password, automatic);
   }
 
   createConnectionStatusHandler(): (status: Status, value: string) => Promise<void> {
-    return (status: Status, value: string) => {
-      return new Promise((resolve, reject) => {
-        log(LogLevel.INFO, `status update; status=${status}, value=${JSON.stringify(value)}`);
-
-        switch (status) {
-          case Status.REDIRECT:
-          case Status.ATTACHED:
-          case Status.CONNECTING:
-          case Status.REGISTER:
-          case Status.REGISTERED:
-          case Status.AUTHENTICATING:
-          case Status.DISCONNECTING:
-          case Status.DISCONNECTED:
-            break;
-          case Status.CONNECTED:
-            resolve();
-            break;
-          case Status.ERROR:
-            reject(`An error occurred connecting, failed with status code: ${status}`);
-            break;
-          case Status.CONNFAIL:
-            reject(`The connection failed, failed with status code: ${status}`);
-            break;
-          case Status.AUTHFAIL:
-            reject(`The authentication failed, failed with status code: ${status}`);
-            break;
-          case Status.CONNTIMEOUT:
-            reject(`The connection timed out, failed with status code: ${status}`);
-            break;
-          case Status.CONFLICT:
-          case Status.REGIFAIL:
-          case Status.NOTACCEPTABLE:
-            reject(`Failed with status code: ${status}`);
-            break;
-          case Status.BINDREQUIRED:
-            this.bind();
-            break;
-          default:
-            log(LogLevel.ERROR, `Unhandled connection status; status=${status}`);
-        }
-
-        this.connectionStatusSubject.next({ status });
-      });
+    return async (status: Status, value: string) => {
+      log(LogLevel.INFO, `status update; status=${status}, value=${JSON.stringify(value)}`);
+      await this.onConnectStatusChanged(status, value);
     };
   }
 
@@ -1441,7 +1410,7 @@ export class Connection {
     automatic = false
   ): Promise<void> {
     if ([AuthenticationMode.ANONYMOUS, AuthenticationMode.EXTERNAL].includes(mode) && !automatic) {
-      await this.connect(jid);
+      await this.connect(jid, undefined, this.createConnectionStatusHandler());
       return;
     }
 
@@ -1465,7 +1434,7 @@ export class Connection {
     password = password ?? (this.sasl.pass as string) ?? this.password;
 
     if (jid && password != null) {
-      await this.connect(jid, password);
+      await this.connect(jid, password, this.createConnectionStatusHandler());
       return;
     }
 
@@ -1662,7 +1631,6 @@ export class Connection {
     return;
   }
 
-  // TODO: Ensure can be replaced by strophe-connection.service then delete
   /**
    * Callback method called by Strophe as the Connection goes
    * through various states while establishing or tearing down a

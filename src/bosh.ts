@@ -611,7 +611,10 @@ export class Bosh implements ProtocolManager {
   }
 
   restoreBOSHSession(): boolean {
-    const jid = this.initBOSHSession();
+    // new session from connection, this.jid keepalive
+    this.connection.jid = this.connection.jid ?? this.jid;
+    this.jid = this.connection.jid;
+    const jid = this.jid;
     try {
       this.restore(jid, async (status, condition) =>
         this.connection.onConnectStatusChanged(status, condition)
@@ -619,13 +622,6 @@ export class Bosh implements ProtocolManager {
       return true;
     } catch (e) {}
     return false;
-  }
-
-  initBOSHSession(): string {
-    // new session from connection, this.jid keepalive
-    this.connection.jid = this.connection.jid ?? this.jid;
-    this.jid = this.connection.jid;
-    return this.jid;
   }
 
   async startNewPreboundBOSHSession(): Promise<void> {

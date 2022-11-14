@@ -3,6 +3,7 @@ import { SASLMechanism } from '../sasl-mechanism';
 import { Status } from '../status';
 import { $iq } from '../builder-helper';
 import { Connection } from '../connection';
+import { BoshRequest } from '../bosh-request';
 
 /**
  * Promise resolves if user account is registered successfully,
@@ -18,7 +19,7 @@ export async function register(
 
   let registering = false;
   let processed_features = false;
-  let connectCallbackData: { req: Element } = { req: null };
+  let connectCallbackData: { req: Element | BoshRequest } = { req: null };
 
   if (username.includes('@')) {
     log(
@@ -31,8 +32,9 @@ export async function register(
   await conn.logOut();
 
   const readyToStartRegistration = new Promise<void>((resolve) => {
-    const originalConnectCallback = (req: Element): void => conn.connectCallback(req);
-    conn.connectCallback = (req) => {
+    const originalConnectCallback = (req: Element | BoshRequest): Promise<void> =>
+      conn.connectCallback(req);
+    conn.connectCallback = async (req) => {
       if (registering) {
         // Save this request in case we want to authenticate later
         connectCallbackData = { req };
@@ -43,11 +45,11 @@ export async function register(
       if (processed_features) {
         // exchange Input hooks to not print the stream:features twice
         const xmlInput = (el: Element): void => conn.xmlInput(el);
-        originalConnectCallback(req);
+        await originalConnectCallback(req);
         conn.xmlInput = xmlInput;
       }
 
-      originalConnectCallback(req);
+      await originalConnectCallback(req);
     };
 
     // hooking strophe`s authenticate
@@ -65,21 +67,12 @@ export async function register(
       conn.sasl.setVariables(username + '@' + domain, password);
 
       const req = connectCallbackData.req;
-      conn.connectCallback(req);
+      await conn.connectCallback(req);
     };
   });
 
   // anonymous connection
-  await conn.connect(
-    domain,
-    '',
-    conn.createConnectionStatusHandler(
-      username,
-      domain,
-      () => {},
-      () => {}
-    )
-  );
+  await conn.connect(domain, '', conn.createConnectionStatusHandler());
 
   registering = true;
   await readyToStartRegistration;
@@ -92,7 +85,7 @@ export async function register(
   // here we should have switched after processing the feature's stanza to the regular callback after login
   conn.reset();
   await conn.logOut();
-  await conn.loginNew(username, domain, service, password);
+  await conn.loginWithoutJid(username, domain, password);
 }
 
 async function queryForRegistrationForm(conn: Connection, nsRegister: string): Promise<void> {
