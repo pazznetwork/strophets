@@ -37,6 +37,7 @@ import { Sasl } from './sasl';
 import { HandlerService } from './handler-service';
 import { register } from './extensions/register';
 import { BoshRequest } from './bosh-request';
+import { connectionPlugins } from './connection-plugins';
 
 /**
  *  XMPP Connection manager.
