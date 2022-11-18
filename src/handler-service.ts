@@ -48,9 +48,9 @@ export class HandlerService {
     this.addHandlersAsync = [];
   }
 
-  checkHandlerChain(authenticated: boolean, child: Element): void {
+  async checkHandlerChain(authenticated: boolean, child: Element): Promise<void> {
     const matches = [];
-    this.handlers = this.handlers.reduce((handlers, handler) => {
+    this.handlers = this.handlers.reduce((handlers: Handler[], handler) => {
       try {
         if (handler.isMatch(child) && (authenticated || !handler.user)) {
           if (handler.run(child)) {
@@ -67,6 +67,24 @@ export class HandlerService {
 
       return handlers;
     }, []);
+
+    const keptHandlers: HandlerAsync[] = [];
+    for (const handlerAsync of this.handlersAsync) {
+      try {
+        if (handlerAsync.isMatch(child) && (authenticated || !handlerAsync.user)) {
+          if (await handlerAsync.run(child)) {
+            keptHandlers.push(handlerAsync);
+          }
+          matches.push(handlerAsync);
+        } else {
+          keptHandlers.push(handlerAsync);
+        }
+      } catch (e) {
+        // if the handler throws an exception, we consider it as false
+        warn('Removing Strophe handlers due to uncaught exception: ' + e.message);
+      }
+    }
+    this.handlersAsync = keptHandlers;
 
     // If no handler was fired for an incoming IQ with type="set",
     // then we return an IQ error stanza with service-unavailable.
@@ -270,6 +288,15 @@ export class HandlerService {
         this.handlers.splice(i, 1);
       }
     }
+
+    // remove handlers scheduled for deletion
+    while (this.removeHandlersAsync.length > 0) {
+      const hand = this.removeHandlersAsync.pop();
+      const i = this.handlersAsync.indexOf(hand);
+      if (i >= 0) {
+        this.handlersAsync.splice(i, 1);
+      }
+    }
   }
 
   /**
@@ -329,6 +356,9 @@ export class HandlerService {
     // add handlers scheduled for addition
     while (this.addHandlers.length > 0) {
       this.handlers.push(this.addHandlers.pop());
+    }
+    while (this.addHandlersAsync.length > 0) {
+      this.handlersAsync.push(this.addHandlersAsync.pop());
     }
   }
 

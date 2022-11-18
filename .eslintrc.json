@@ -1,5 +1,9 @@
 {
   "root": true,
+  "env": {
+    "browser": true,
+    "node": false
+  },
   "parser": "@typescript-eslint/parser",
   "extends": [
     "plugin:rxjs/recommended",
@@ -11,7 +15,8 @@
     "eslint-plugin-jsdoc",
     "eslint-plugin-import",
     "eslint-plugin-jasmine",
-    "eslint-plugin-prefer-arrow"
+    "eslint-plugin-prefer-arrow",
+    "eslint-plugin-rxjs"
   ],
   "ignorePatterns": [
     "dist/*"

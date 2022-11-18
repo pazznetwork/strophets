@@ -5,14 +5,6 @@ export interface ProtocolManager {
   connection: Connection;
 
   /**
-   *  Reset the connection.
-   *
-   *  This function is called by the reset function of the Strophe Connection.
-   *  Is not needed by WebSockets.
-   */
-  reset(): void;
-
-  /**
    * Connect to the server using the current protocol manager
    */
   connect(): void;
@@ -40,30 +32,21 @@ export interface ProtocolManager {
   doDisconnect(): void;
 
   /**
-   *  Returns:
-   *    True, because WebSocket messages are send immediately after queueing.
-   */
-  emptyQueue(): boolean;
-
-  /**
    * Called on stream start/restart when no stream:features has been received.
    */
   noAuthReceived(): void;
 
   /**
-   *  sends all queued stanzas
-   */
-  onIdle(): void;
-
-  /**
-   *  Part of the Connection.send function for WebSocket
+   *  Send a stanza.
    *
-   * Just flushes the messages that are in the queue
+   *  For BOSH:
+   *  This function is called to push data onto the send queue to go out over the wire.  Whenever a request is sent to the BOSH
+   *  server, all pending data is sent and the queue is flushed.
+   *
+   *  For Websocket:
+   *  Sends the stanza immediately.
+   *
+   *  @param elem - The stanza to send.
    */
-  send(): void;
-
-  /**
-   *  Send an xmpp:restart stanza.
-   */
-  sendRestart(): void;
+  send(elem: Element): void;
 }

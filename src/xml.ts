@@ -12,10 +12,10 @@ export enum ElementType {
   NORMAL = 1,
   TEXT = 3,
   CDATA = 4,
-  FRAGMENT = 11
+  FRAGMENT = 11,
 }
 
-/** Function: forEachChild
+/**
  *  Map a function over some or all child elements of a given element.
  *
  *  This is a small convenience function for mapping a function over
@@ -30,9 +30,15 @@ export enum ElementType {
  *    @param func - The function to apply to each child.  This
  *      function should take a single argument, a DOM element. A return value will be ignored.
  */
-export function forEachChild(elem: Element, elemName: string, func: (child: Element) => unknown): void {
-  Array.from(elem.childNodes)
-    .filter((node) => node.nodeType === ElementType.NORMAL && (!elemName || isTagEqual(node, elemName)))
+export function forEachChildMap<U>(
+  elem: Element,
+  elemName: string,
+  func: (child: Element) => U
+): U[] {
+  return Array.from(elem.childNodes)
+    .filter(
+      (node) => node.nodeType === ElementType.NORMAL && (!elemName || isTagEqual(node, elemName))
+    )
     .map(func);
 }
 
@@ -85,7 +91,10 @@ export function xmlGenerator(): Document {
  *  Returns:
  *    @returns A new XML DOM element.
  */
-export function xmlElement(name: string, options?: { text?: string; attrs?: Record<string, string> | [string, string][] }): Element {
+export function xmlElement(
+  name: string,
+  options?: { text?: string; attrs?: Record<string, string> | [string, string][] }
+): Element {
   if (!name) {
     return null;
   }
@@ -127,7 +136,7 @@ export function xmlElement(name: string, options?: { text?: string; attrs?: Reco
  *     @returns Escaped text.
  */
 export function xmlescape(text: string): string {
-  text = text.replace(/\&/g, '&amp;');
+  text = text.replace(/&/g, '&amp;');
   text = text.replace(/</g, '&lt;');
   text = text.replace(/>/g, '&gt;');
   text = text.replace(/'/g, '&apos;');
@@ -146,7 +155,7 @@ export function xmlescape(text: string): string {
  *     @returns Unescaped text.
  */
 export function xmlunescape(text: string): string {
-  text = text.replace(/\&amp;/g, '&');
+  text = text.replace(/&amp;/g, '&');
   text = text.replace(/&lt;/g, '<');
   text = text.replace(/&gt;/g, '>');
   text = text.replace(/&apos;/g, "'");
@@ -258,7 +267,13 @@ export function createHtml(elem: HTMLElement): Node {
       const el = xmlElement(tag);
       for (const attribute of XHTML.attributes[tag]) {
         let value = elem.getAttribute(attribute);
-        if (typeof value === 'undefined' || value === null || value === '' || value === 'false' || value === '0') {
+        if (
+          typeof value === 'undefined' ||
+          value === null ||
+          value === '' ||
+          value === 'false' ||
+          value === '0'
+        ) {
           continue;
         }
         // filter out invalid css styles
@@ -320,9 +335,9 @@ export function escapeNode(node: string): string {
     .replace(/^\s+|\s+$/g, '')
     .replace(/\\/g, '\\5c')
     .replace(/ /g, '\\20')
-    .replace(/\"/g, '\\22')
-    .replace(/\&/g, '\\26')
-    .replace(/\'/g, '\\27')
+    .replace(/"/g, '\\22')
+    .replace(/&/g, '\\26')
+    .replace(/'/g, '\\27')
     .replace(/\//g, '\\2f')
     .replace(/:/g, '\\3a')
     .replace(/</g, '\\3c')
@@ -446,7 +461,10 @@ export function serialize(el: Element | Builder | { tree: () => Element }): stri
   const elem: Element = !(el instanceof Element) ? el.tree() : el;
   const names = Array.from(elem.attributes).map((attribute) => attribute.localName);
   names.sort();
-  let result = names.reduce((a, n) => `${a} ${n}="${xmlescape(elem.attributes.getNamedItem(n).value)}"`, `<${elem.nodeName}`);
+  let result = names.reduce(
+    (a, n) => `${a} ${n}="${xmlescape(elem.attributes.getNamedItem(n).value)}"`,
+    `<${elem.nodeName}`
+  );
 
   if (elem.childNodes.length > 0) {
     result += '>';

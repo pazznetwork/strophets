@@ -11,7 +11,7 @@
  *  will use Strophe.Connection.addHandler() and
  *  Strophe.Connection.deleteHandler().
  */
-import { forEachChild, getBareJidFromJid, isTagEqual } from './xml';
+import { forEachChildMap, getBareJidFromJid, isTagEqual } from './xml';
 import { handleError } from './error';
 
 export class Handler {
@@ -75,7 +75,7 @@ export class Handler {
     if (!this.ns) {
       return true;
     } else {
-      forEachChild(elem, null, (el) => {
+      forEachChildMap(elem, null, (el) => {
         if (this.getNamespace(el) === this.ns) {
           nsMatch = true;
         }

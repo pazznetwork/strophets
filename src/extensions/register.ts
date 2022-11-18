@@ -4,6 +4,8 @@ import { Status } from '../status';
 import { $iq } from '../builder-helper';
 import { Connection } from '../connection';
 import { BoshRequest } from '../bosh-request';
+import { Bosh } from '../bosh';
+import { StropheWebsocket } from '../strophe-websocket';
 
 /**
  * Promise resolves if user account is registered successfully,
@@ -18,8 +20,7 @@ export async function register(
   const nsRegister = 'jabber:iq:register';
 
   let registering = false;
-  let processed_features = false;
-  let connectCallbackData: { req: Element | BoshRequest } = { req: null };
+  let processedFeatures = false;
 
   if (username.includes('@')) {
     log(
@@ -31,48 +32,17 @@ export async function register(
   const conn = await Connection.create(service, domain);
   await conn.logOut();
 
-  const readyToStartRegistration = new Promise<void>((resolve) => {
-    const originalConnectCallback = (req: Element | BoshRequest): Promise<void> =>
-      conn.connectCallback(req);
-    conn.connectCallback = async (req) => {
-      if (registering) {
-        // Save this request in case we want to authenticate later
-        connectCallbackData = { req };
-        resolve();
-        return;
-      }
-
-      if (processed_features) {
-        // exchange Input hooks to not print the stream:features twice
-        const xmlInput = (el: Element): void => conn.xmlInput(el);
-        await originalConnectCallback(req);
-        conn.xmlInput = xmlInput;
-      }
-
-      await originalConnectCallback(req);
-    };
-
-    // hooking strophe`s authenticate
-    const authOld = async (matched: SASLMechanism[]): Promise<void> => conn.authenticate(matched);
-    conn.authenticate = async (matched: SASLMechanism[]): Promise<void> => {
-      if (matched) {
-        await authOld(matched);
-        return;
-      }
-
-      if (!username || !domain || !password) {
-        return;
-      }
-
-      conn.sasl.setVariables(username + '@' + domain, password);
-
-      const req = connectCallbackData.req;
-      await conn.connectCallback(req);
-    };
-  });
+  const readyToStartRegistration = createRegistrationPromise(
+    conn,
+    () => processedFeatures,
+    () => registering,
+    username,
+    domain,
+    password
+  );
 
   // anonymous connection
-  await conn.connect(domain, '', conn.createConnectionStatusHandler());
+  await conn.connect(domain);
 
   registering = true;
   await readyToStartRegistration;
@@ -81,11 +51,108 @@ export async function register(
   await submitRegisterInformationQuery(conn, username, password, nsRegister);
 
   registering = false;
-  processed_features = true;
+  processedFeatures = true;
   // here we should have switched after processing the feature's stanza to the regular callback after login
   conn.reset();
   await conn.logOut();
   await conn.loginWithoutJid(username, domain, password);
+}
+
+function createRegistrationPromise(
+  conn: Connection,
+  processedFeatures: () => boolean,
+  registering: () => boolean,
+  username: string,
+  domain: string,
+  password: string
+): Promise<void> {
+  if (conn.protocolManager instanceof Bosh) {
+    const connectCallbackData: { boshRequest: BoshRequest } = { boshRequest: null };
+    const bosh = conn.protocolManager;
+    return new Promise<void>((resolve) => {
+      const originalConnectCallback = (innerBosh: Bosh, req: BoshRequest): void =>
+        conn.connectCallbackBosh(bosh, req);
+      conn.connectCallbackBosh = async (innerBosh: Bosh, req) => {
+        if (registering()) {
+          // Save this request in case we want to authenticate later
+          connectCallbackData.boshRequest = req;
+          resolve();
+          return;
+        }
+
+        if (processedFeatures()) {
+          // exchange Input hooks to not print the stream:features twice
+          const xmlInput = (el: Element): void => conn.xmlInput(el);
+          await originalConnectCallback(innerBosh, req);
+          conn.xmlInput = xmlInput;
+        }
+
+        await originalConnectCallback(innerBosh, req);
+      };
+
+      // hooking strophe`s authenticate
+      const authOld = async (matched: SASLMechanism[]): Promise<void> => conn.authenticate(matched);
+      conn.authenticate = async (matched: SASLMechanism[]): Promise<void> => {
+        if (matched) {
+          await authOld(matched);
+          return;
+        }
+
+        if (!username || !domain || !password) {
+          return;
+        }
+
+        conn.sasl.setVariables(username + '@' + domain, password);
+
+        await conn.connectCallbackBosh(bosh, connectCallbackData.boshRequest);
+      };
+    });
+  }
+  if (conn.protocolManager instanceof StropheWebsocket) {
+    const connectCallbackData: { element: Element } = { element: null };
+    const websocket = conn.protocolManager;
+    return new Promise<void>((resolve) => {
+      const originalConnectCallback = (
+        innerWebsocket: StropheWebsocket,
+        req: Element
+      ): Promise<void> => conn.connectCallbackWebsocket(innerWebsocket, req);
+      conn.connectCallbackWebsocket = async (innerWebsocket: StropheWebsocket, req: Element) => {
+        if (registering()) {
+          // Save this request in case we want to authenticate later
+          connectCallbackData.element = req;
+          resolve();
+          return;
+        }
+
+        if (processedFeatures()) {
+          // exchange Input hooks to not print the stream:features twice
+          const xmlInput = (el: Element): void => conn.xmlInput(el);
+          await originalConnectCallback(innerWebsocket, req);
+          conn.xmlInput = xmlInput;
+        }
+
+        await originalConnectCallback(innerWebsocket, req);
+      };
+
+      // hooking strophe`s authenticate
+      const authOld = async (matched: SASLMechanism[]): Promise<void> => conn.authenticate(matched);
+      conn.authenticate = async (matched: SASLMechanism[]): Promise<void> => {
+        if (matched) {
+          await authOld(matched);
+          return;
+        }
+
+        if (!username || !domain || !password) {
+          return;
+        }
+
+        conn.sasl.setVariables(username + '@' + domain, password);
+
+        await conn.connectCallbackWebsocket(websocket, connectCallbackData.element);
+      };
+    });
+  }
+  return Promise.resolve();
 }
 
 async function queryForRegistrationForm(conn: Connection, nsRegister: string): Promise<void> {

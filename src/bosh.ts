@@ -7,7 +7,7 @@ import { debug, error, warn } from './log';
 import { Status } from './status';
 import { SECONDARY_TIMEOUT, TIMEOUT } from './timeout';
 import { ProtocolManager } from './protocol-manager';
-import { Subject, takeUntil } from 'rxjs';
+import { share, Subject, takeUntil } from 'rxjs';
 import { Builder } from './builder';
 
 /**
@@ -33,14 +33,17 @@ export class Bosh implements ProtocolManager {
    */
   limit = 5;
   private lastResponseHeaders: string;
-  //TODO: there are in general only 2 requests should be refactored into a tupel or two request properties
   private readonly requests: BoshRequest[];
 
-  private destroySubject = new Subject<void>();
+  private readonly destroySubject = new Subject<void>();
+  private readonly destroy$ = this.destroySubject.pipe(share());
+
   private readonly notAbleToResumeBOSHSessionSubject = new Subject<void>();
-  notAbleToResumeBOSHSession$ = this.notAbleToResumeBOSHSessionSubject.asObservable();
+  readonly notAbleToResumeBOSHSession$ = this.notAbleToResumeBOSHSessionSubject.asObservable();
 
   jid: string;
+
+  data: Element[] = [];
 
   get primaryTimeout(): number {
     return Math.floor(TIMEOUT * this.wait);
@@ -60,7 +63,7 @@ export class Bosh implements ProtocolManager {
    */
   constructor(readonly connection: Connection, private readonly prebindUrl?: string) {
     this.connection.userJid$
-      .pipe(takeUntil(this.destroySubject))
+      .pipe(takeUntil(this.destroy$))
       .subscribe((newJid) => (this.jid = newJid));
 
     /* The current session ID. */
@@ -97,7 +100,7 @@ export class Bosh implements ProtocolManager {
         body.tree(),
         (req) =>
           this.onRequestStateChange(
-            (requestElement) => this.connection.connectCallback(requestElement.xmlData),
+            (requestElement) => this.connection.connectCallbackBosh(this, requestElement),
             req
           ),
         Number.parseInt(body.tree().getAttribute('rid'), 10)
@@ -144,6 +147,7 @@ export class Bosh implements ProtocolManager {
    *  This function is called by the reset function of the Strophe Connection
    */
   reset(): void {
+    this.data = [];
     this.rid = this.getRandomIdForConnection();
     this.sid = null;
     globalThis.sessionStorage.removeItem('strophe-bosh-session');
@@ -158,23 +162,17 @@ export class Bosh implements ProtocolManager {
    *  without putting user credentials into the page.
    *
    *  Parameters:
-   *    (String) jid - The full JID that is bound by the session.
-   *    (String) sid - The SID of the BOSH session.
-   *    (String) rid - The current RID of the BOSH session.  This RID
+   *
+   *    @param jid - The full JID that is bound by the session.
+   *    @param sid - The SID of the BOSH session.
+   *    @param rid - The current RID of the BOSH session.  This RID
    *      will be used by the next request.
-   *    (Function) callback The connect-callback function.
    */
-  attach(
-    jid: string,
-    sid: string,
-    rid: number,
-    callback: (status: number, condition: string) => Promise<void>
-  ): void {
+  attach(jid: string, sid: string, rid: number): void {
     this.connection.jid = jid;
     this.sid = sid;
     this.rid = rid;
 
-    this.connection.callback = callback;
     this.connection.domain = getDomainFromJid(this.connection.jid);
     this.connection.authenticated = true;
     this.connection.connected = true;
@@ -183,31 +181,34 @@ export class Bosh implements ProtocolManager {
   }
 
   /**
-   *  Attempt to restore a cached BOSH session
    *
-   *   @param jid - The full JID that is bound by the session.
-   *      This parameter is optional but recommended, specifically in cases
-   *      where prebinded BOSH sessions are used where it's important to know
-   *      that the right session is being restored.
-   *   @param callback function.
+   * Attempt to restore a cached BOSH session.
+   *
+   * This function is only useful in conjunction with providing the
+   * “keepalive”:true option when instantiating a new Connection.
+   * When “keepalive” is set to true, Strophe will cache the BOSH tokens
+   * RID (Request ID) and SID (Session ID) and then when this function is called,
+   * it will attempt to restore the session from those cached tokens.
+   * This function must therefore be called instead of connect or attach.
+   *
+   *    @param jid - The user’s JID.  This may be a bare JID or a full JID.
    */
-  restore(jid: string, callback: (status: number, condition: string) => Promise<void>): void {
+  restore(jid: string): void {
     const session = JSON.parse(window.sessionStorage.getItem('strophe-bosh-session'));
     if (
-      session != null &&
-      session.rid &&
-      session.sid &&
-      session.jid &&
-      (jid == null ||
+      !(session?.rid && session?.sid && session?.jid) ||
+      !(
+        jid == null ||
         getBareJidFromJid(session.jid) === getBareJidFromJid(jid) ||
         // If authcid is null, then it's an anonymous login, so
         // we compare only the domains:
-        (getNodeFromJid(jid) == null && getDomainFromJid(session.jid) === jid))
+        (getNodeFromJid(jid) == null && getDomainFromJid(session.jid) === jid)
+      )
     ) {
-      this.attach(session.jid, session.sid, session.rid, callback);
-    } else {
       throw new Error('restore: no session that can be restored.');
     }
+
+    this.attach(session.jid, session.sid, session.rid);
   }
 
   /**
@@ -271,7 +272,7 @@ export class Bosh implements ProtocolManager {
     const body = this.buildBody();
     const rid = Number.parseInt(body.tree().getAttribute('rid'), 10);
     this.requests.push(
-      new BoshRequest(body.tree(), (req) => this.connection.connectCallback(req.xmlData), rid)
+      new BoshRequest(body.tree(), (req) => this.connection.connectCallbackBosh(this, req), rid)
     );
     this.throttledRequestHandler();
   }
@@ -303,25 +304,20 @@ export class Bosh implements ProtocolManager {
    *  Sends all queued Requests or polls with empty Request if there are none.
    */
   onIdle(): void {
-    const data = this.connection.data;
     // if no requests are in progress, poll
     if (
       this.connection.authenticated &&
       this.requests.length === 0 &&
-      data.length === 0 &&
+      this.data.length === 0 &&
       !this.connection.disconnecting
     ) {
       debug('no requests during idle cycle, sending blank request');
-      data.push(null);
+      this.data.push(null);
     }
 
-    if (this.connection.paused) {
-      return;
-    }
-
-    if (this.requests.length < 2 && data.length > 0) {
+    if (this.requests.length < 2 && this.data.length > 0) {
       const body = this.buildBody();
-      for (const dataPart of data) {
+      for (const dataPart of this.data) {
         if (dataPart !== null && dataPart.tagName !== 'restart') {
           body.cnode(dataPart).up();
           continue;
@@ -333,12 +329,16 @@ export class Bosh implements ProtocolManager {
           'xmlns:xmpp': NS.BOSH,
         });
       }
-      delete this.connection.data;
-      this.connection.data = [];
+      delete this.data;
+      this.data = [];
       this.requests.push(
         new BoshRequest(
           body.tree(),
-          this.onRequestStateChange.bind(this, this.connection.dataReceived.bind(this.connection)),
+          (req) =>
+            this.onRequestStateChange(
+              (innerReq) => this.connection.dataReceivedBOSH(this, innerReq),
+              req
+            ),
           Number.parseInt(body.tree().getAttribute('rid'), 10)
         )
       );
@@ -462,16 +462,16 @@ export class Bosh implements ProtocolManager {
 
   private ensureAliveRequest(request: BoshRequest): BoshRequest {
     const reqStatus = request.getRequestStatus();
-    const primary_timeout = !isNaN(request.age) && request.age > this.primaryTimeout;
-    const secondary_timeout =
+    const primaryTimeout = !isNaN(request.age) && request.age > this.primaryTimeout;
+    const secondaryTimeout =
       request.dead && request.timeDead > Math.floor(SECONDARY_TIMEOUT * this.wait);
-    const server_error = request.xhr.readyState === 4 && (reqStatus < 1 || reqStatus >= 500);
+    const serverError = request.xhr.readyState === 4 && (reqStatus < 1 || reqStatus >= 500);
 
-    if (secondary_timeout) {
+    if (secondaryTimeout) {
       error(`Request ${this.rid} timed out (secondary), restarting`);
     }
 
-    if (primary_timeout || secondary_timeout || server_error) {
+    if (primaryTimeout || secondaryTimeout || serverError) {
       request.abort = true;
       request.xhr.abort();
       // setting to null fails on IE6, so set to empty function
@@ -556,7 +556,11 @@ export class Bosh implements ProtocolManager {
     }
     const req = new BoshRequest(
       body.tree(),
-      this.onRequestStateChange.bind(this, this.connection.dataReceived.bind(this.connection)),
+      (innerReq) =>
+        this.onRequestStateChange(
+          (innerInnerReq) => this.connection.dataReceivedBOSH(this, innerInnerReq),
+          innerReq
+        ),
       Number.parseInt(body.tree().getAttribute('rid'), 10)
     );
     this.requests.push(req);
@@ -566,7 +570,8 @@ export class Bosh implements ProtocolManager {
   /**
    * Triggers the RequestHandler to send the messages that are in the queue
    */
-  send(): void {
+  send(elem: Element): void {
+    this.data.push(elem);
     clearTimeout(this.connection.idleTimeout);
     this.throttledRequestHandler();
     this.connection.idleTimeout = setTimeout(() => this.connection.onIdle(), 100);
@@ -588,24 +593,15 @@ export class Bosh implements ProtocolManager {
    *  request died.
    */
   throttledRequestHandler(): void {
-    if (!this.requests) {
-      debug('_throttledRequestHandler called with ' + 'undefined requests');
-    } else {
-      debug('_throttledRequestHandler called with ' + this.requests.length + ' requests');
-    }
-
-    if (!this.requests || this.requests.length === 0) {
+    if (this.requests.length === 0) {
       return;
     }
 
-    if (this.requests.length > 0) {
-      this.processRequest(0);
-    }
+    this.processRequest(0);
 
-    if (
-      this.requests.length > 1 &&
-      Math.abs(this.requests[0].rid - this.requests[1].rid) < this.limit
-    ) {
+    const parallelRequestLimitHit =
+      Math.abs(this.requests[0].rid - this.requests[1].rid) > this.limit;
+    if (this.requests.length > 1 && !parallelRequestLimitHit) {
       this.processRequest(1);
     }
   }
@@ -616,9 +612,7 @@ export class Bosh implements ProtocolManager {
     this.jid = this.connection.jid;
     const jid = this.jid;
     try {
-      this.restore(jid, async (status, condition) =>
-        this.connection.onConnectStatusChanged(status, condition)
-      );
+      this.restore(jid);
       return true;
     } catch (e) {}
     return false;
@@ -630,9 +624,7 @@ export class Bosh implements ProtocolManager {
         this.prebindUrl
       );
       this.connection.jid = jid;
-      this.attach(jid, sid, rid, (status, condition) =>
-        this.connection.onConnectStatusChanged(status, condition)
-      );
+      this.attach(jid, sid, rid);
     } catch (e) {
       this.connection.clearSession();
       this.destroySubject.next();

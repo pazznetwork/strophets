@@ -17,13 +17,13 @@ import { info } from './log';
 import { Status } from './status';
 import { Connection } from './connection';
 import { SaslData } from './sasl-data';
+import { Bosh } from './bosh';
 
 export class Sasl {
   saslData: SaslData = {};
   doBind = false;
   doSession = false;
-  mechanism: Record<string, SASLMechanism>;
-  mechanisms: SASLMechanism[] = [];
+  mechanism: Map<string, SASLMechanism> = new Map<string, SASLMechanism>();
 
   saslSuccessHandler: Handler;
   saslFailureHandler: Handler;
@@ -58,25 +58,22 @@ export class Sasl {
    *
    *  Parameters:
    *
-   *    @param mechanisms - Array of objects with SASLMechanism prototypes
+   *    @param mechanisms - Array of SASLMechanism Constructors
    *
    */
-  registerSASLMechanisms(mechanisms: SASLMechanism[]): void {
-    this.mechanisms = [];
-    mechanisms =
-      mechanisms ||
-      ([
-        SASLAnonymous,
-        SASLExternal,
-        SASLOAuthBearer,
-        SASLXOAuth2,
-        SASLPlain,
-        SASLSHA1,
-        SASLSHA256,
-        SASLSHA384,
-        SASLSHA512,
-      ] as unknown as SASLMechanism[]);
-    // @ts-ignore
+  registerSASLMechanisms(
+    mechanisms: (new () => SASLMechanism)[] = [
+      SASLAnonymous,
+      SASLExternal,
+      SASLOAuthBearer,
+      SASLXOAuth2,
+      SASLPlain,
+      SASLSHA1,
+      SASLSHA256,
+      SASLSHA384,
+      SASLSHA512,
+    ]
+  ): void {
     mechanisms.forEach((m) => this.registerSASLMechanism(m));
   }
 
@@ -278,10 +275,10 @@ export class Sasl {
    *  Send an xmpp:restart stanza.
    */
   sendRestart(): void {
-    this.connection.data.push($build('restart').tree());
-    this.connection.protocolManager.sendRestart();
-    // @ts-ignore
-    this.idleTimeout = setTimeout(() => this._onIdle(), 100);
+    this.connection.send($build('restart').tree());
+    if (this.connection.protocolManager instanceof Bosh) {
+      this.connection.protocolManager.sendRestart();
+    }
   }
 
   /**

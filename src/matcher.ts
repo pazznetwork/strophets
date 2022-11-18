@@ -11,7 +11,7 @@
  *  will use Strophe.Connection.addHandler() and
  *  Strophe.Connection.deleteHandler().
  */
-import { forEachChild, getBareJidFromJid, isTagEqual } from './xml';
+import { forEachChildMap, getBareJidFromJid, isTagEqual } from './xml';
 
 export interface MatcherConfig {
   /**
@@ -108,7 +108,7 @@ export class Matcher {
       return true;
     }
 
-    forEachChild(elem, null, (el) => {
+    forEachChildMap(elem, null, (el) => {
       const elNS = this.getNamespace(el);
       if ((ns && elNS === ns) || (noNS && elNS !== noNS)) {
         nsMatch = true;
@@ -131,13 +131,16 @@ export class Matcher {
   isMatch(elem: Element): boolean {
     const { matchBareFromJid, tagName, type, id, from } = this.config;
 
-    const elemFrom = matchBareFromJid ? elem.getAttribute('from') : getBareJidFromJid(elem.getAttribute('from'));
+    const elemFrom = matchBareFromJid
+      ? elem.getAttribute('from')
+      : getBareJidFromJid(elem.getAttribute('from'));
     const elemType = elem.getAttribute('type');
     const elemId = elem.getAttribute('id');
 
     const nsMatch = this.namespaceMatch(elem);
     const tagNameMatch = tagName && isTagEqual(elem, tagName);
-    const typeMatch = type && ((Array.isArray(type) && type.includes(elemType)) || elemType === type);
+    const typeMatch =
+      type && ((Array.isArray(type) && type.includes(elemType)) || elemType === type);
     const idMatch = id && elemId === id;
     const fromMatch = from && elemFrom === from;
 

@@ -6,7 +6,7 @@ import { debug, error, warn } from './log';
 import { serialize } from './xml';
 import { ErrorCondition } from './error';
 import { ProtocolManager } from './protocol-manager';
-import { Subject } from 'rxjs';
+import { Subject, switchMap } from 'rxjs';
 import { Builder } from './builder';
 
 /**
@@ -14,7 +14,11 @@ import { Builder } from './builder';
  */
 export class StropheWebsocket implements ProtocolManager {
   readonly connection: Connection;
-  protected socket: WebSocket;
+  readonly socket: WebSocket;
+
+  private onWebsocketMessageSubject = new Subject<MessageEvent>();
+
+  private initialMessage = true;
 
   /**
    *   @param connection - The Connection owning this protocol manager
@@ -22,26 +26,16 @@ export class StropheWebsocket implements ProtocolManager {
    */
   constructor(connection: Connection, private readonly stanzasInSubject: Subject<Element>) {
     this.connection = connection;
+    this.connection.service = this.determineWebsocketUrl(
+      this.connection.service,
+      this.connection?.options?.protocol
+    );
 
-    const service = connection.service;
-    if (service.indexOf('ws:') !== 0 && service.indexOf('wss:') !== 0) {
-      // If the service is not an absolute URL, assume it is a path and put the absolute
-      // URL together from options, current URL and the path.
-      let newService = '';
-      if (connection.options.protocol === 'ws' && window.location.protocol !== 'https:') {
-        newService += 'ws';
-      } else {
-        newService += 'wss';
-      }
+    this.socket = new WebSocket(this.connection.service, 'xmpp');
 
-      newService += '://' + window.location.host;
-      if (service.indexOf('/') !== 0) {
-        newService += window.location.pathname + service;
-      } else {
-        newService += service;
-      }
-      connection.service = newService;
-    }
+    this.onWebsocketMessageSubject
+      .pipe(switchMap((messageEvent: MessageEvent) => this.onMessage(messageEvent)))
+      .subscribe();
   }
 
   /**
@@ -86,28 +80,15 @@ export class StropheWebsocket implements ProtocolManager {
   }
 
   /**
-   *  Reset the connection.
-   *
-   *  This function is called by the reset function of the Strophe Connection.
-   *  Is not needed by WebSockets.
-   */
-  reset(): void {
-    return;
-  }
-
-  /**
    *  Creates a WebSocket for a connection and assigns Callbacks to it.
    *  Does nothing if there already is a WebSocket.
    */
   connect(): void {
-    // Ensure that there is no open WebSocket from a previous Connection.
-    this.closeSocket();
-    this.socket = new WebSocket(this.connection.service, 'xmpp');
     this.socket.onopen = () => this.onOpen();
     this.socket.onerror = (e) => this.onError(e);
-    this.socket.onclose = (e) => this.onClose(e);
-    // Gets replaced with this._onMessage once _onInitialMessage is called
-    this.socket.onmessage = (message) => this.onInitialMessage(message);
+    this.socket.onclose = () => this.onClose();
+    this.initialMessage = true;
+    this.socket.onmessage = (message) => this.onWebsocketMessageSubject.next(message);
   }
 
   /** PrivateFunction: _connect_cb
@@ -127,97 +108,66 @@ export class StropheWebsocket implements ProtocolManager {
   }
 
   /**
-   * function that checks the opening <open /> tag for errors.
-   *
-   * Disconnects if there is an error and returns false, true otherwise.
-   *
-   * @param message - Stanza containing the <open /> tag.
-   */
-  handleStreamStartStanza(message: Element): boolean {
-    let errorMessage;
-
-    // Check for errorMessages in the <open /> tag
-    const ns = message.getAttribute('xmlns');
-    if (ns == null) {
-      errorMessage = 'Missing xmlns in <open />';
-    } else if (ns !== NS.FRAMING) {
-      errorMessage = 'Wrong xmlns in <open />: ' + ns;
-    }
-
-    const ver = message.getAttribute('version');
-    if (ver == null) {
-      errorMessage = 'Missing version in <open />';
-    } else if (ver !== '1.0') {
-      errorMessage = 'Wrong version in <open />: ' + ver;
-    }
-
-    if (errorMessage) {
-      this.connection.changeConnectStatus(Status.CONNFAIL, errorMessage);
-      this.connection.doDisconnect();
-      return false;
-    }
-    return true;
-  }
-
-  /**
    * On receiving an opening stream tag this callback replaces itself with the real
    * message handler. On receiving a stream error the connection is terminated.
    */
-  onInitialMessage(message: { data: string }): void {
-    if (message.data.indexOf('<open ') === 0 || message.data.indexOf('<?xml') === 0) {
+  async onInitialMessage(xmlData: string): Promise<void> {
+    const isXmlDeclaration = xmlData.startsWith('<?xml');
+    const isOpenStanza = xmlData.startsWith('<open');
+    const isCloseStanza = xmlData.startsWith('<close');
+    if (isXmlDeclaration) {
+      return; /*
       // Strip the XML Declaration, if there is one
-      const data = message.data.replace(/^(<\?.*?\?>\s*)*/, '');
+      const data = xmlData.replace(/^(<\?.*?\?>\s*)*!/, '');
       if (data === '') {
         return;
-      }
+      }*/
+    }
 
-      const streamStart = this.parseToXml(data);
+    if (!isOpenStanza && !isCloseStanza) {
+      this.initialMessage = false;
+      const elem = this.parseToXml(xmlData);
+      await this.connection.connectCallbackWebsocket(this, elem);
+      return;
+    }
+
+    if (isOpenStanza) {
+      const streamStart = this.parseToXml(xmlData);
       this.connection.xmlInput?.(streamStart);
       this.stanzasInSubject.next(streamStart);
 
-      //_handleStreamSteart will check for XML errors and disconnect on error
-      if (this.handleStreamStartStanza(streamStart)) {
-        //_connect_cb will check for stream:error and disconnect on error
-        this.connectCb(streamStart);
-      }
-    } else if (message.data.indexOf('<close ') === 0) {
+      //connectCb will check for stream:error and disconnect on error
+      this.connectCb(streamStart);
+      return;
+    }
+
+    if (isCloseStanza) {
       // <close xmlns="urn:ietf:params:xml:ns:xmpp-framing />
       // Parse the raw string to an XML element
-      const parsedMessage = this.parseToXml(message.data);
+      const parsedMessage = this.parseToXml(xmlData);
       // Report this input to the raw and xml handlers
       this.connection.xmlInput?.(parsedMessage);
       this.stanzasInSubject.next(parsedMessage);
-      const see_uri = parsedMessage.getAttribute('see-other-uri');
-      if (see_uri) {
-        const service = this.connection.service;
-        // Valid scenarios: WSS->WSS, WS->ANY
-        const isSecureRedirectOld =
-          (service.indexOf('wss:') >= 0 && see_uri.indexOf('wss:') >= 0) ||
-          service.indexOf('ws:') >= 0;
-        const isSecureRedirect =
-          (service.includes('wss:') && see_uri.includes('wss:')) || service.includes('ws:');
-        if (isSecureRedirectOld !== isSecureRedirect) {
-          throw new Error('BAD REFACTOR!!!!');
-        }
-        if (isSecureRedirect) {
-          this.connection.changeConnectStatus(
-            Status.REDIRECT,
-            'Received see-other-uri, resetting connection'
-          );
-          this.connection.reset();
-          this.connection.service = see_uri;
-          this.connect();
-        }
-      } else {
+      const seeUri = parsedMessage.getAttribute('see-other-uri');
+      if (!seeUri) {
         this.connection.changeConnectStatus(Status.CONNFAIL, 'Received closing stream');
         this.connection.doDisconnect();
+        return;
       }
-    } else {
-      // replace the message handler set to onInitialMessage with the general message handler
-      this.socket.onmessage = (m) => this.onMessage(m);
-      const wrappedXML = this.streamWrap(message.data);
-      const elem = this.parseToXml(wrappedXML);
-      this.connection.connectCallback(elem);
+      const service = this.connection.service;
+      // Valid scenarios: WSS->WSS, WS->ANY
+      const isSecureRedirect =
+        (service.startsWith('wss:') && seeUri.startsWith('wss:')) || service.startsWith('ws:');
+      if (!isSecureRedirect) {
+        return;
+      }
+      this.connection.changeConnectStatus(
+        Status.REDIRECT,
+        'Received see-other-uri, resetting connection'
+      );
+      this.connection.reset();
+      this.connection.service = seeUri;
+      this.connect();
     }
   }
 
@@ -244,62 +194,25 @@ export class StropheWebsocket implements ProtocolManager {
   }
 
   /**
-   *  Just closes the Socket for WebSockets
+   *  Removes listeners on the Websocket
    */
   doDisconnect(): void {
-    debug('WebSockets doDisconnect was called');
-    this.closeSocket();
-  }
-
-  /**
-   * Wraps a stanza in a <ws-stream> tag. This is used we can process stanzas from WebSockets like BOSH in Connection
-   */
-  streamWrap(stanza: string): string {
-    return '<ws-wrapper>' + stanza + '</ws-wrapper>';
-  }
-
-  /**
-   *  Closes the socket if it is still open and deletes it
-   */
-  closeSocket(): void {
-    if (!this.socket) {
-      return;
-    }
+    error('WebSockets doDisconnect was called');
     try {
       this.socket.onclose = null;
       this.socket.onerror = null;
       this.socket.onmessage = null;
-      this.socket.close();
     } catch (e) {
       debug(e.message);
     }
-    this.socket = null;
-  }
-
-  /**
-   *   @returns true, because WebSocket messages are send immediately after queueing.
-   */
-  emptyQueue(): true {
-    return true;
   }
 
   /**
    * Handles the websockets closing.
    */
-  onClose(e: CloseEvent): void {
+  onClose(): void {
     if (this.connection.connected && !this.connection.disconnecting) {
       error('Websocket closed unexpectedly');
-      this.connection.doDisconnect();
-    } else if (e && e.code === 1006 && !this.connection.connected && this.socket) {
-      // in case the onError callback was not called (Safari 10 does not
-      // call onerror when the initial connection fails) we need to
-      // dispatch a CONNFAIL status update to be consistent with the
-      // behavior on other browsers.
-      error('Websocket closed unexcectedly');
-      this.connection.changeConnectStatus(
-        Status.CONNFAIL,
-        'The WebSocket connection could not be established or was disconnected.'
-      );
       this.connection.doDisconnect();
     } else {
       debug('Websocket closed');
@@ -328,24 +241,6 @@ export class StropheWebsocket implements ProtocolManager {
   }
 
   /**
-   *  sends all queued stanzas
-   */
-  onIdle(): void {
-    const data = this.connection.data;
-    if (data.length > 0 && !this.connection.paused) {
-      for (const dataPart of data) {
-        if (dataPart !== null) {
-          const stanza = dataPart.tagName === 'restart' ? this.buildStream().tree() : dataPart;
-          const rawStanza = serialize(stanza);
-          this.connection.xmlOutput?.(stanza);
-          this.socket.send(rawStanza);
-        }
-      }
-      this.connection.data = [];
-    }
-  }
-
-  /**
    * This function handles the websocket messages and parses each of the messages as if they are full documents.
    *
    * Since all XMPP traffic starts with
@@ -364,27 +259,25 @@ export class StropheWebsocket implements ProtocolManager {
    *
    * @param message - The websocket message.
    */
-  onMessage({ data: xmlData }: MessageEvent): void {
-    let elem;
-    // check for closing stream
-    const close = '<close xmlns="urn:ietf:params:xml:ns:xmpp-framing" />';
-    if (xmlData === close) {
+  async onMessage({ data: xmlData }: MessageEvent): Promise<void> {
+    if (this.initialMessage) {
+      return this.onInitialMessage(xmlData);
+    }
+
+    const isCloseStanza = xmlData.startsWith(
+      '<close xmlns="urn:ietf:params:xml:ns:xmpp-framing />'
+    );
+    if (isCloseStanza) {
       this.connection.xmlInput?.(xmlData);
       this.stanzasInSubject.next(xmlData);
-      if (!this.connection.disconnecting) {
-        this.connection.doDisconnect();
-      }
-      return;
-    } else if (xmlData.search('<open ') === 0) {
-      // This handles stream restarts
-      elem = this.parseToXml(xmlData);
-      if (!this.handleStreamStartStanza(elem)) {
+      if (this.connection.disconnecting) {
         return;
       }
-    } else {
-      const data = this.streamWrap(xmlData);
-      elem = this.parseToXml(data);
+      this.connection.doDisconnect();
+      return;
     }
+
+    const elem = this.parseToXml(xmlData);
 
     if (this.checkStreamError(elem, Status.ERROR)) {
       return;
@@ -403,7 +296,7 @@ export class StropheWebsocket implements ProtocolManager {
       // wait for the </stream:stream> tag before we close the connection
       return;
     }
-    this.connection.dataReceived(elem);
+    await this.connection.dataReceivedWebsocket(elem);
   }
 
   /**
@@ -422,19 +315,28 @@ export class StropheWebsocket implements ProtocolManager {
   /**
    * Flushes the messages that are in the queue
    */
-  send(): void {
+  send(elem: Element): void {
     this.connection.flush();
-  }
-
-  /**
-   *  Send an xmpp:restart stanza.
-   */
-  sendRestart(): void {
-    clearTimeout(this.connection.idleTimeout);
-    this.connection.onIdle.bind(this.connection)();
+    const stanza = elem.tagName === 'restart' ? this.buildStream().tree() : elem;
+    const rawStanza = serialize(stanza);
+    this.connection.xmlOutput?.(stanza);
+    this.socket.send(rawStanza);
   }
 
   private parseToXml(data: string): Element {
     return new DOMParser().parseFromString(data, 'text/xml').documentElement;
+  }
+
+  private determineWebsocketUrl(service: string, protocolOption: string | undefined): string {
+    if (service.startsWith('ws:') || service.startsWith('wss:')) {
+      return service;
+    }
+
+    // If the service is not an absolute URL, assume it is a path and put the absolute
+    // URL together from options, current URL and the path.
+    const prefix = protocolOption !== 'ws' || window.isSecureContext ? 'wss' : 'ws';
+    const path = service.startsWith('/') ? service : window.location.pathname + service;
+
+    return `${prefix}://${window.location.host}${path}`;
   }
 }
