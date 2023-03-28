@@ -515,7 +515,7 @@ export class StropheWebsocket implements ProtocolManager {
    *    The stanza that was passed.
    */
   _reqToData(request: Request): Element {
-    return request.xmlData;
+    return request;
   }
 
   /** PrivateFunction: _send
